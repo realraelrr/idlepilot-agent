@@ -6,25 +6,54 @@ import os
 import websockets
 from loguru import logger
 from dotenv import load_dotenv, set_key
-from XianyuApis import XianyuApis
+from XianyuApis import XianyuApis, CookieInvalidError
 import sys
 import random
 
 
 from utils.xianyu_utils import generate_mid, generate_uuid, trans_cookies, generate_device_id, decrypt
+from utils.notifier import build_notifier_from_env
 from XianyuAgent import XianyuReplyBot
 from context_manager import ChatContextManager
 
+COOKIE_FILE_DIR = "data"
+COOKIE_FILE_NAME = "cookies.txt"
+
+
+def get_cookie_file_path():
+    configured_path = os.getenv("COOKIE_FILE_PATH", os.path.join(COOKIE_FILE_DIR, COOKIE_FILE_NAME))
+    if os.path.isabs(configured_path):
+        return configured_path
+    return os.path.join(os.getcwd(), configured_path)
+
+
+def get_cookie_file_label():
+    return os.getenv("COOKIE_FILE_PATH", os.path.join(COOKIE_FILE_DIR, COOKIE_FILE_NAME))
+
+
+def ensure_cookie_file_exists():
+    cookie_path = get_cookie_file_path()
+    data_dir = os.path.dirname(cookie_path) or os.getcwd()
+    os.makedirs(data_dir, exist_ok=True)
+    if not os.path.exists(cookie_path):
+        with open(cookie_path, "w", encoding="utf-8"):
+            pass
+    return cookie_path
+
 
 class XianyuLive:
-    def __init__(self, cookies_str):
+    def __init__(self, cookies_str=None):
         self.xianyu = XianyuApis()
         self.base_url = 'wss://wss-goofish.dingtalk.com/'
-        self.cookies_str = cookies_str
-        self.cookies = trans_cookies(cookies_str)
-        self.xianyu.session.cookies.update(self.cookies)  # 直接使用 session.cookies.update
-        self.myid = self.cookies['unb']
-        self.device_id = generate_device_id(self.myid)
+        self.notifier = build_notifier_from_env()
+        self.cookie_invalid_alert_sent = False
+        if cookies_str is None:
+            cookies_str = self.load_cookie_string()
+        self.cookies_str = ""
+        self.cookies = {}
+        self.myid = ""
+        self.device_id = ""
+        self.apply_cookie_string(cookies_str)
         self.context_manager = ChatContextManager()
         
         # 心跳相关配置
@@ -42,6 +71,7 @@ class XianyuLive:
         self.current_token = None
         self.token_refresh_task = None
         self.connection_restart_flag = False  # 连接重启标志
+        self.cookie_invalid_flag = False
         
         # 人工接管相关配置
         self.manual_mode_conversations = set()  # 存储处于人工接管模式的会话ID
@@ -56,6 +86,46 @@ class XianyuLive:
         
         # 模拟人工输入配置
         self.simulate_human_typing = os.getenv("SIMULATE_HUMAN_TYPING", "False").lower() == "true"
+
+    def send_cookie_invalid_alert_once(self):
+        if self.cookie_invalid_alert_sent:
+            return False
+        self.cookie_invalid_alert_sent = True
+        return self.notifier.send_cookie_invalid_alert()
+
+    def reset_cookie_invalid_alert(self):
+        self.cookie_invalid_alert_sent = False
+
+    def enter_cookie_invalid_state(self, reason):
+        self.cookie_invalid_flag = True
+        logger.error(reason)
+        self.send_cookie_invalid_alert_once()
+
+    def read_cookie_file(self):
+        cookie_path = ensure_cookie_file_exists()
+        try:
+            with open(cookie_path, "r", encoding="utf-8") as f:
+                return f.read().strip()
+        except Exception as e:
+            logger.warning(f"读取cookie文件失败: {e}")
+            return ""
+
+    def load_cookie_string(self):
+        file_cookie = self.read_cookie_file()
+        if file_cookie:
+            return file_cookie
+        return (os.getenv("COOKIES_STR") or "").strip()
+
+    def apply_cookie_string(self, cookie_str):
+        normalized_cookie = (cookie_str or "").strip()
+        parsed_cookies = trans_cookies(normalized_cookie) if normalized_cookie else {}
+
+        self.cookies_str = normalized_cookie
+        self.cookies = parsed_cookies
+        self.xianyu.session.cookies.clear()
+        self.xianyu.session.cookies.update(parsed_cookies)
+        self.myid = parsed_cookies.get("unb", "")
+        self.device_id = generate_device_id(self.myid if self.myid else "anonymous")
 
     async def refresh_token(self):
         """刷新token"""
@@ -73,7 +143,8 @@ class XianyuLive:
             else:
                 logger.error(f"Token刷新失败: {token_result}")
                 return None
-                
+        except CookieInvalidError:
+            raise
         except Exception as e:
             logger.error(f"Token刷新异常: {str(e)}")
             return None
@@ -87,8 +158,15 @@ class XianyuLive:
                 # 检查是否需要刷新token
                 if current_time - self.last_token_refresh_time >= self.token_refresh_interval:
                     logger.info("Token即将过期，准备刷新...")
-                    
-                    new_token = await self.refresh_token()
+
+                    try:
+                        new_token = await self.refresh_token()
+                    except CookieInvalidError:
+                        self.enter_cookie_invalid_state("检测到Cookie失效，关闭当前连接并进入恢复等待")
+                        if self.ws:
+                            await self.ws.close()
+                        break
+
                     if new_token:
                         logger.info("Token刷新成功，准备重新建立连接...")
                         # 设置连接重启标志
@@ -108,6 +186,63 @@ class XianyuLive:
             except Exception as e:
                 logger.error(f"Token刷新循环出错: {e}")
                 await asyncio.sleep(60)
+
+    async def cleanup_connection_resources(self):
+        if self.ws:
+            try:
+                await self.ws.close()
+            except Exception:
+                pass
+            self.ws = None
+
+        if self.heartbeat_task:
+            self.heartbeat_task.cancel()
+            try:
+                await self.heartbeat_task
+            except asyncio.CancelledError:
+                pass
+            self.heartbeat_task = None
+
+        if self.token_refresh_task:
+            self.token_refresh_task.cancel()
+            try:
+                await self.token_refresh_task
+            except asyncio.CancelledError:
+                pass
+            self.token_refresh_task = None
+
+    async def wait_for_cookie_refresh(self):
+        logger.warning(f"状态切换：等待cookie刷新（轮询 {get_cookie_file_label()}）")
+        last_seen = self.cookies_str
+
+        while True:
+            candidate_cookie = self.read_cookie_file()
+            if not candidate_cookie or candidate_cookie == last_seen:
+                await asyncio.sleep(5)
+                continue
+
+            previous_cookie = self.cookies_str
+            try:
+                self.apply_cookie_string(candidate_cookie)
+                new_token = await self.refresh_token()
+                if not new_token:
+                    logger.warning("新cookie暂未通过验证，继续等待下一次更新")
+                    self.apply_cookie_string(previous_cookie)
+                    last_seen = candidate_cookie
+                    await asyncio.sleep(5)
+                    continue
+                logger.info("新cookie验证成功，恢复连接")
+                self.reset_cookie_invalid_alert()
+                return
+            except CookieInvalidError:
+                logger.warning("新cookie验证失败，继续等待下一次更新")
+                self.apply_cookie_string(previous_cookie)
+                last_seen = candidate_cookie
+            except Exception as e:
+                logger.error(f"cookie验证异常，继续等待: {e}")
+                self.apply_cookie_string(previous_cookie)
+                last_seen = candidate_cookie
+            await asyncio.sleep(5)
 
     async def send_msg(self, ws, cid, toid, text):
         text = {
@@ -547,6 +682,8 @@ class XianyuLive:
                 
             await self.send_msg(websocket, chat_id, send_user_id, bot_reply)
             
+        except CookieInvalidError:
+            raise
         except Exception as e:
             logger.error(f"处理消息时发生错误: {str(e)}")
             logger.debug(f"原始消息: {message_data}")
@@ -675,6 +812,8 @@ class XianyuLive:
                             logger.error(f"处理消息时发生错误: {str(e)}")
                             logger.debug(f"原始消息: {message}")
 
+            except CookieInvalidError:
+                self.enter_cookie_invalid_state("检测到Cookie失效，准备进入等待刷新状态")
             except websockets.exceptions.ConnectionClosed:
                 logger.warning("WebSocket连接已关闭")
                 
@@ -682,20 +821,12 @@ class XianyuLive:
                 logger.error(f"连接发生错误: {e}")
                 
             finally:
-                # 清理任务
-                if self.heartbeat_task:
-                    self.heartbeat_task.cancel()
-                    try:
-                        await self.heartbeat_task
-                    except asyncio.CancelledError:
-                        pass
-                        
-                if self.token_refresh_task:
-                    self.token_refresh_task.cancel()
-                    try:
-                        await self.token_refresh_task
-                    except asyncio.CancelledError:
-                        pass
+                await self.cleanup_connection_resources()
+
+                if self.cookie_invalid_flag:
+                    await self.wait_for_cookie_refresh()
+                    self.cookie_invalid_flag = False
+                    self.connection_restart_flag = True
                 
                 # 如果是主动重启，立即重连；否则等待5秒
                 if self.connection_restart_flag:
@@ -711,7 +842,6 @@ def check_and_complete_env():
     # 定义关键变量及其默认无效值（占位符）
     critical_vars = {
         "API_KEY": "默认使用通义千问,apikey通过百炼模型平台获取",
-        "COOKIES_STR": "your_cookies_here"
     }
     
     env_path = ".env"
@@ -767,12 +897,14 @@ if __name__ == '__main__':
         format="<green>{time:YYYY-MM-DD HH:mm:ss.SSS}</green> | <level>{level: <8}</level> | <cyan>{name}</cyan>:<cyan>{function}</cyan>:<cyan>{line}</cyan> - <level>{message}</level>"
     )
     logger.info(f"日志级别设置为: {log_level}")
+
+    # 准备cookie文件（不存在则创建空文件）
+    ensure_cookie_file_exists()
     
     # 交互式检查并补全配置
     check_and_complete_env()
     
-    cookies_str = os.getenv("COOKIES_STR")
     bot = XianyuReplyBot()
-    xianyuLive = XianyuLive(cookies_str)
+    xianyuLive = XianyuLive()
     # 常驻进程
     asyncio.run(xianyuLive.main())

@@ -1,11 +1,12 @@
 import time
-import os
-import re
-import sys
 
 import requests
 from loguru import logger
 from utils.xianyu_utils import generate_sign
+
+
+class CookieInvalidError(Exception):
+    """Raised when cookie is invalid and requires manual refresh."""
 
 
 class XianyuApis:
@@ -49,42 +50,6 @@ class XianyuApis:
                 
         # 替换session的cookies
         self.session.cookies = new_jar
-        
-        # 更新完cookies后，更新.env文件
-        self.update_env_cookies()
-        
-    def update_env_cookies(self):
-        """更新.env文件中的COOKIES_STR"""
-        try:
-            # 获取当前cookies的字符串形式
-            cookie_str = '; '.join([f"{cookie.name}={cookie.value}" for cookie in self.session.cookies])
-            
-            # 读取.env文件
-            env_path = os.path.join(os.getcwd(), '.env')
-            if not os.path.exists(env_path):
-                logger.warning(".env文件不存在，无法更新COOKIES_STR")
-                return
-                
-            with open(env_path, 'r', encoding='utf-8') as f:
-                env_content = f.read()
-                
-            # 使用正则表达式替换COOKIES_STR的值
-            if 'COOKIES_STR=' in env_content:
-                new_env_content = re.sub(
-                    r'COOKIES_STR=.*', 
-                    f'COOKIES_STR={cookie_str}',
-                    env_content
-                )
-                
-                # 写回.env文件
-                with open(env_path, 'w', encoding='utf-8') as f:
-                    f.write(new_env_content)
-                    
-                logger.debug("已更新.env文件中的COOKIES_STR")
-            else:
-                logger.warning(".env文件中未找到COOKIES_STR配置项")
-        except Exception as e:
-            logger.warning(f"更新.env文件失败: {str(e)}")
         
     def hasLogin(self, retry_count=0):
         """调用hasLogin.do接口进行登录状态检查"""
@@ -146,8 +111,7 @@ class XianyuApis:
                 return self.get_token(device_id, 0)  # 重置重试次数
             else:
                 logger.error("重新登录失败，Cookie已失效")
-                logger.error("🔴 程序即将退出，请更新.env文件中的COOKIES_STR后重新启动")
-                sys.exit(1)  # 直接退出程序
+                raise CookieInvalidError("Cookie invalid after token retries and relogin attempt")
             
         params = {
             'jsv': '2.7.2',
@@ -186,37 +150,7 @@ class XianyuApis:
                     error_msg = str(ret_value)
                     if 'RGV587_ERROR' in error_msg or '被挤爆啦' in error_msg:
                         logger.error(f"❌ 触发风控: {ret_value}")
-                        logger.error("🔴 系统目前无法自动解决，请进入闲鱼网页版-点击消息-过滑块-复制最新的Cookie")
-                        
-                        # 获取用户输入的新Cookie
-                        print("\n" + "="*50)
-                        new_cookie_str = input("请输入新的Cookie字符串 (复制浏览器中的完整cookie，直接回车则退出程序): ").strip()
-                        print("="*50 + "\n")
-                        
-                        if new_cookie_str:
-                            try:
-                                # 解析cookie字符串并更新session
-                                from http.cookies import SimpleCookie
-                                cookie = SimpleCookie()
-                                cookie.load(new_cookie_str)
-                                
-                                # 清空旧cookie并设置新cookie
-                                self.session.cookies.clear()
-                                for key, morsel in cookie.items():
-                                    self.session.cookies.set(key, morsel.value, domain='.goofish.com')
-                                
-                                logger.success("✅ Cookie已更新，正在尝试重连...")
-                                # 同步更新到.env文件
-                                self.update_env_cookies()
-                                
-                                # 立即重试
-                                return self.get_token(device_id, 0)
-                            except Exception as e:
-                                logger.error(f"Cookie解析失败: {e}")
-                                sys.exit(1)
-                        else:
-                            logger.info("用户取消输入，程序退出")
-                            sys.exit(1)
+                        raise CookieInvalidError("Cookie blocked by RGV587 risk control")
 
                     logger.warning(f"Token API调用失败，错误信息: {ret_value}")
                     # 处理响应中的Set-Cookie
@@ -231,7 +165,8 @@ class XianyuApis:
             else:
                 logger.error(f"Token API返回格式异常: {res_json}")
                 return self.get_token(device_id, retry_count + 1)
-                
+        except CookieInvalidError:
+            raise
         except Exception as e:
             logger.error(f"Token API请求异常: {str(e)}")
             time.sleep(0.5)
@@ -282,6 +217,10 @@ class XianyuApis:
                 ret_value = res_json.get('ret', [])
                 # 检查ret是否包含成功信息
                 if not any('SUCCESS::调用成功' in ret for ret in ret_value):
+                    error_msg = str(ret_value)
+                    if 'RGV587_ERROR' in error_msg or '被挤爆啦' in error_msg:
+                        logger.error(f"❌ 商品信息接口触发风控: {ret_value}")
+                        raise CookieInvalidError("Cookie invalid while fetching item info")
                     logger.warning(f"商品信息API调用失败，错误信息: {ret_value}")
                     # 处理响应中的Set-Cookie
                     if 'Set-Cookie' in response.headers:
@@ -295,7 +234,8 @@ class XianyuApis:
             else:
                 logger.error(f"商品信息API返回格式异常: {res_json}")
                 return self.get_item_info(item_id, retry_count + 1)
-                
+        except CookieInvalidError:
+            raise
         except Exception as e:
             logger.error(f"商品信息API请求异常: {str(e)}")
             time.sleep(0.5)

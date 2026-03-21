@@ -66,15 +66,29 @@ pip install -r requirements.txt
 创建一个 `.env` 文件，包含以下内容，也可直接重命名 `.env.example` ：
 #必配配置
 API_KEY=apikey通过模型平台获取
-COOKIES_STR=填写网页端获取的cookie
+COOKIES_STR=填写网页端获取的cookie（仅启动兜底）
+COOKIE_FILE_PATH=data/cookies.txt
 MODEL_BASE_URL=模型地址
 MODEL_NAME=模型名称
 #可选配置
+MODEL_REASONING_EFFORT=全局默认推理强度，可选 none/minimal/low/medium/high/xhigh
+CLASSIFY_MODEL_REASONING_EFFORT=意图分类Agent推理强度，优先级高于全局默认
+PRICE_MODEL_REASONING_EFFORT=议价Agent推理强度，优先级高于全局默认
+TECH_MODEL_REASONING_EFFORT=技术Agent推理强度，优先级高于全局默认
+DEFAULT_MODEL_REASONING_EFFORT=默认回复Agent推理强度，优先级高于全局默认
+TECH_ENABLE_SEARCH=True/False #技术Agent是否向模型转发enable_search，默认False
 TOGGLE_KEYWORDS=接管模式切换关键词，默认为句号（输入句号切换为人工接管，再次输入则切换AI接管）
 SIMULATE_HUMAN_TYPING=True/False #模拟人工回复延迟
+FEISHU_NOTIFY_ENABLED=True/False #开启Cookie失效飞书告警（默认False）
+FEISHU_WEBHOOK_URL=飞书机器人Webhook地址
 
-注意：默认使用的模型是通义千问，如需使用其他API，请自行修改.env文件中的模型地址和模型名称；
-COOKIES_STR自行在闲鱼网页端获取cookies(网页端F12打开控制台，选择Network，点击Fetch/XHR,点击一个请求，查看cookies)
+注意：当前版本统一使用 OpenAI `responses` 协议；如需使用其他 API，请确认服务端兼容 `responses` 请求格式，再修改 `.env` 文件中的模型地址和模型名称；
+推理强度支持全局默认值，也支持按 Agent 单独覆盖，未配置时会自动回退到默认行为；
+如果你的转发 API 不支持 `enable_search`，请保持 `TECH_ENABLE_SEARCH=False`；
+COOKIES_STR自行在闲鱼网页端获取cookies(网页端F12打开控制台，选择Network，点击Fetch/XHR,点击一个请求，查看cookies)；
+运行时Cookie实时来源为 `data/cookies.txt`，程序会优先读取该文件；
+当Cookie失效并触发 `CookieInvalidError` 后，进程不会退出，会进入等待状态，更新 `data/cookies.txt` 后自动恢复连接；
+运行时不会再回写 `.env` 中的 `COOKIES_STR`，`.env` 仅用于启动兼容兜底。
 
 4. 创建提示词文件prompts/*_prompt.txt（也可以直接将模板名称中的_example去掉），否则默认读取四个提示词模板中的内容
 ```
@@ -150,5 +164,3 @@ python main.py
    <img alt="Star History Chart" src="https://api.star-history.com/svg?repos=shaxiu/XianyuAutoAgent&type=Date" />
  </picture>
 </a>
-
-

@@ -1,0 +1,41 @@
+# Progress
+
+## 2026-03-21
+- Created isolated worktree at `/Users/rael/.config/superpowers/worktrees/XianyuAutoAgent-v1/cookie-recovery-alerting` on branch `feat/cookie-recovery-alerting` to avoid touching the dirty `main` workspace.
+- Reviewed the cookie recovery plan and current implementation in `main.py` and `XianyuApis.py`.
+- Confirmed the current blockers match the plan scope: startup cookie handling is interactive, runtime cookie state is initialized only once, and invalid cookies currently trigger stdin prompting plus `sys.exit(1)`.
+- Added file-backed cookie helpers in `main.py`, created `data/.gitkeep` and `data/cookies.example.txt`, and ignored `data/cookies.txt`.
+- Added focused regression coverage in `tests/test_cookie_recovery.py` for cookie source selection, invalid-cookie signaling, runtime cookie application, wait-for-refresh recovery, and single-episode Feishu alerts.
+- Introduced `CookieInvalidError` in `XianyuApis.py`, removed stdin-driven cookie entry and runtime `.env` mutation, and let invalid cookies propagate back to the main loop.
+- Centralized runtime cookie application in `main.py` so the websocket header cookie, parsed cookies, HTTP session cookies, runtime identity, and derived device ID update together.
+- Added `wait_for_cookie_refresh()` and connection cleanup helpers so invalid cookies transition into a polling wait state instead of terminating the process.
+- Added optional one-way Feishu webhook alerting via `utils/notifier.py`, with one alert per invalid-cookie episode and reset after successful validation.
+- Tightened recovery validation so `wait_for_cookie_refresh()` only exits waiting mode when `refresh_token()` returns a real success value, not when it returns `None`.
+- Fixed operator-facing recovery messages so they reference the configured `COOKIE_FILE_PATH` instead of always hardcoding `data/cookies.txt`.
+- Restored `.env` API key persistence and added regression coverage after catching a missing `set_key` import during review.
+- Extended cookie-invalid recovery coverage to the item-detail fetch path: `XianyuApis.get_item_info()` now raises `CookieInvalidError` on the same invalid-cookie signals, and `main.py` no longer swallows that exception inside `handle_message()`.
+- Updated `.env.example`, `.gitignore`, and `README.md` to describe the file-backed cookie workflow, startup-only `.env` fallback, and optional Feishu alerting.
+- Verification evidence:
+  - `conda run -p '/Users/rael/Library/Mobile Documents/com~apple~CloudDocs/CodeProjects/XianyuAutoAgent-v1/conda-env' python -m unittest tests.test_cookie_recovery -v` -> superseded by later full-suite reruns after follow-up fixes
+  - `conda run -p '/Users/rael/Library/Mobile Documents/com~apple~CloudDocs/CodeProjects/XianyuAutoAgent-v1/conda-env' python -m unittest discover -s tests -v` -> latest run `Ran 11 tests in 0.012s`, `OK`
+  - `conda run -p '/Users/rael/Library/Mobile Documents/com~apple~CloudDocs/CodeProjects/XianyuAutoAgent-v1/conda-env' python -m compileall XianyuApis.py main.py utils tests` -> exit `0`
+  - `rg -n "cookies.txt|CookieInvalidError|自动恢复|自动接续|\\.env" README.md .env.example .gitignore` -> matched the expected file-backed workflow and `data/cookies.txt` ignore rule
+- Manual smoke evidence:
+  - `env API_KEY=dummy-test-key COOKIE_FILE_PATH=/tmp/xianyu-cookie-recovery-smoke.txt COOKIES_STR= LOG_LEVEL=INFO conda run --no-capture-output -p '/Users/rael/Library/Mobile Documents/com~apple~CloudDocs/CodeProjects/XianyuAutoAgent-v1/conda-env' python -u main.py`
+  - Observed startup without any cookie prompt, then `获取初始token...`, followed by `检测到Cookie失效，准备进入等待刷新状态` and `状态切换：等待cookie刷新（轮询 /tmp/xianyu-cookie-recovery-smoke.txt）`
+- Manual smoke gap:
+  - Still not fully closed-loop verified with a real fresh valid cookie written into the watched file and an observed successful reconnect.
+  - Current evidence proves entry into waiting state and the automated control-flow tests prove the reconnect path under mocked validation, but end-to-end live recovery remains pending real-cookie validation.
+- Latest live validation attempt:
+  - Started with an intentionally invalid cookie in `/tmp/xianyu-cookie-recovery-live.txt`, observed the process enter waiting state as expected.
+  - Replaced the watched file with a user-provided fresh cookie and observed an immediate validation attempt.
+  - Validation failed with `FAIL_SYS_USER_VALIDATE` and `RGV587_ERROR`, so the process correctly stayed in waiting state and did not reconnect.
+  - Result: the recovery control flow is confirmed live up to “watch file -> detect change -> validate candidate -> remain waiting on invalid candidate”, but end-to-end recovery is still blocked on a cookie that passes Goofish validation.
+- Successful live closed-loop verification:
+  - Re-ran the same waiting-state flow with a later user-provided cookie containing a fresh `x5sec`.
+  - Observed `Token获取成功`, `Token刷新成功`, `新cookie验证成功，恢复连接`, `主动重启连接，立即重连...`, and `连接注册完成`.
+  - Waited an additional observation window after reconnect without seeing an immediate disconnect or recovery regression.
+  - Result: the end-to-end live path is now verified for “invalid cookie -> waiting state -> file update -> successful validation -> websocket reconnect”.
+- Deferred follow-up scope:
+  - Feishu remote cookie update is intentionally deferred.
+  - It needs a separate inbound control-plane design plus authorization and secret-handling review before implementation.
