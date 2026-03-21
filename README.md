@@ -81,6 +81,16 @@ TOGGLE_KEYWORDS=接管模式切换关键词，默认为句号（输入句号切�
 SIMULATE_HUMAN_TYPING=True/False #模拟人工回复延迟
 FEISHU_NOTIFY_ENABLED=True/False #开启Cookie失效飞书告警（默认False）
 FEISHU_WEBHOOK_URL=飞书机器人Webhook地址
+FEISHU_APP_ID=飞书自建应用的 App ID
+FEISHU_APP_SECRET=飞书自建应用的 App Secret
+FEISHU_ADMIN_OPEN_IDS=允许提交 Cookie 的管理员 open_id，逗号分隔
+FEISHU_CALLBACK_HOST=飞书回调服务监听地址，默认 127.0.0.1
+FEISHU_CALLBACK_PORT=飞书回调服务监听端口，默认 8100
+FEISHU_CALLBACK_PATH=飞书事件回调路径，默认 /feishu/events
+FEISHU_CALLBACK_MODE=事件校验模式，当前版本建议使用 token
+FEISHU_VERIFICATION_TOKEN=FEISHU_CALLBACK_MODE=token 时必填
+FEISHU_ENCRYPT_KEY=FEISHU_CALLBACK_MODE=encrypt 时使用；当前构建不支持加密事件体
+FEISHU_STALE_LOCK_SECONDS=单飞提交锁的过期秒数，默认 300
 
 注意：当前版本统一使用 OpenAI `responses` 协议；如需使用其他 API，请确认服务端兼容 `responses` 请求格式，再修改 `.env` 文件中的模型地址和模型名称；
 推理强度支持全局默认值，也支持按 Agent 单独覆盖，未配置时会自动回退到默认行为；
@@ -89,6 +99,11 @@ COOKIES_STR自行在闲鱼网页端获取cookies(网页端F12打开控制台，�
 运行时Cookie实时来源为 `data/cookies.txt`，程序会优先读取该文件；
 当Cookie失效并触发 `CookieInvalidError` 后，进程不会退出，会进入等待状态，更新 `data/cookies.txt` 后自动恢复连接；
 运行时不会再回写 `.env` 中的 `COOKIES_STR`，`.env` 仅用于启动兼容兜底。
+如果启用飞书私聊控制面，请把飞书事件订阅模式配置为 `token` 校验，并将回调 URL 指向 `https://<你的域名><FEISHU_CALLBACK_PATH>`；
+版本 1 仅接受白名单管理员的私聊文本消息，不接受群聊提交，不会回显 Cookie 内容；
+控制面会将提交状态写入 `data/cookie_submission_state.json`，主进程会将恢复状态写入 `data/runtime_status.json`；
+同一时间只允许一个 Cookie 提交处于校验中，后续提交会收到“稍后重试”提示；
+飞书重复回调会按 `event_id` / `message_id` 去重，避免重复写入和重复回复。
 
 4. 创建提示词文件prompts/*_prompt.txt（也可以直接将模板名称中的_example去掉），否则默认读取四个提示词模板中的内容
 ```
@@ -99,6 +114,34 @@ COOKIES_STR自行在闲鱼网页端获取cookies(网页端F12打开控制台，�
 ```bash
 python main.py
 ```
+
+启动飞书控制面：
+```bash
+python -m services.feishu_control_plane
+```
+
+控制面启动后会打印一个手工校验命令，可直接用来验证本地服务和回调路径是否正确。
+
+### 飞书 Cookie 控制面
+
+1. 在飞书开放平台创建自建应用并启用机器人能力。
+2. 在事件订阅中开启私聊消息事件，并把回调 URL 指向你的 HTTPS 域名加 `FEISHU_CALLBACK_PATH`。
+3. 事件校验模式当前建议选择 `token`，并把同一个 token 写入 `FEISHU_VERIFICATION_TOKEN`。
+4. 将允许操作的管理员 `open_id` 写入 `FEISHU_ADMIN_OPEN_IDS`。
+5. 主进程 `python main.py` 和控制面 `python -m services.feishu_control_plane` 需要部署在同一台机器并共享项目目录下的 `data/`。
+
+支持的私聊命令：
+
+- `/help`：返回支持的命令说明
+- `/status`：返回当前恢复状态、更新时间和最近一条运维提示
+- 直接发送完整 Cookie 文本：写入 `data/cookies.txt` 并启动校验
+
+回执行为：
+
+- 接收成功后立即回复 `已接收，开始校验`
+- 主进程恢复成功后回复 `Cookie 已生效，连接已恢复`
+- 主进程校验失败后回复 `Cookie 已接收，但校验失败，请重新获取`
+- 如果 60 秒内没有等到匹配的恢复结果，会回复超时提示
 
 ### 自定义提示词
 

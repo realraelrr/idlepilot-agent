@@ -3,12 +3,14 @@ import json
 import asyncio
 import time
 import os
+import tempfile
 import websockets
 from loguru import logger
 from dotenv import load_dotenv, set_key
 from XianyuApis import XianyuApis, CookieInvalidError
 import sys
 import random
+from datetime import datetime, timezone
 
 
 from utils.xianyu_utils import generate_mid, generate_uuid, trans_cookies, generate_device_id, decrypt
@@ -18,6 +20,8 @@ from context_manager import ChatContextManager
 
 COOKIE_FILE_DIR = "data"
 COOKIE_FILE_NAME = "cookies.txt"
+SUBMISSION_STATE_FILE_NAME = "cookie_submission_state.json"
+RUNTIME_STATUS_FILE_NAME = "runtime_status.json"
 
 
 def get_cookie_file_path():
@@ -39,6 +43,35 @@ def ensure_cookie_file_exists():
         with open(cookie_path, "w", encoding="utf-8"):
             pass
     return cookie_path
+
+
+def get_submission_state_path():
+    return os.path.join(os.getcwd(), COOKIE_FILE_DIR, SUBMISSION_STATE_FILE_NAME)
+
+
+def get_runtime_status_path():
+    return os.path.join(os.getcwd(), COOKIE_FILE_DIR, RUNTIME_STATUS_FILE_NAME)
+
+
+def read_json_file(path):
+    if not os.path.exists(path):
+        return {}
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
+def atomic_write_json(path, payload):
+    data_dir = os.path.dirname(path) or os.getcwd()
+    os.makedirs(data_dir, exist_ok=True)
+    with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=data_dir, delete=False) as temp_file:
+        json.dump(payload, temp_file, ensure_ascii=False, indent=2)
+        temp_file.flush()
+        os.fsync(temp_file.fileno())
+        temp_path = temp_file.name
+    os.replace(temp_path, path)
 
 
 class XianyuLive:
@@ -127,6 +160,37 @@ class XianyuLive:
         self.myid = parsed_cookies.get("unb", "")
         self.device_id = generate_device_id(self.myid if self.myid else "anonymous")
 
+    def get_active_submission_id(self):
+        submission_state = read_json_file(get_submission_state_path())
+        if submission_state.get("state") == "in_progress":
+            return submission_state.get("submission_id", "")
+        return ""
+
+    def publish_runtime_status(self, state, message, submission_id=""):
+        payload = {
+            "state": state,
+            "updated_at": datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds"),
+            "message": message,
+        }
+        if submission_id:
+            payload["submission_id"] = submission_id
+        atomic_write_json(get_runtime_status_path(), payload)
+
+    def publish_connected_idle_status(self):
+        active_submission_id = self.get_active_submission_id()
+        current_status = read_json_file(get_runtime_status_path())
+        if (
+            active_submission_id
+            and current_status.get("submission_id") == active_submission_id
+            and current_status.get("state") in {"recovered", "validation_failed"}
+        ):
+            return
+
+        self.publish_runtime_status(
+            "idle",
+            "WebSocket connected and waiting for messages",
+        )
+
     async def refresh_token(self):
         """刷新token"""
         try:
@@ -212,6 +276,12 @@ class XianyuLive:
             self.token_refresh_task = None
 
     async def wait_for_cookie_refresh(self):
+        active_submission_id = self.get_active_submission_id()
+        self.publish_runtime_status(
+            "waiting_for_cookie",
+            "Cookie invalid, waiting for refresh",
+            submission_id=active_submission_id,
+        )
         logger.warning(f"状态切换：等待cookie刷新（轮询 {get_cookie_file_label()}）")
         last_seen = self.cookies_str
 
@@ -222,19 +292,40 @@ class XianyuLive:
                 continue
 
             previous_cookie = self.cookies_str
+            submission_id = self.get_active_submission_id() or active_submission_id
             try:
+                self.publish_runtime_status(
+                    "validating_new_cookie",
+                    "Validating updated cookie",
+                    submission_id=submission_id,
+                )
                 self.apply_cookie_string(candidate_cookie)
                 new_token = await self.refresh_token()
                 if not new_token:
+                    self.publish_runtime_status(
+                        "validation_failed",
+                        "Cookie validation failed",
+                        submission_id=submission_id,
+                    )
                     logger.warning("新cookie暂未通过验证，继续等待下一次更新")
                     self.apply_cookie_string(previous_cookie)
                     last_seen = candidate_cookie
                     await asyncio.sleep(5)
                     continue
+                self.publish_runtime_status(
+                    "recovered",
+                    "Cookie validated and websocket reconnected",
+                    submission_id=submission_id,
+                )
                 logger.info("新cookie验证成功，恢复连接")
                 self.reset_cookie_invalid_alert()
                 return
             except CookieInvalidError:
+                self.publish_runtime_status(
+                    "validation_failed",
+                    "Cookie validation failed",
+                    submission_id=submission_id,
+                )
                 logger.warning("新cookie验证失败，继续等待下一次更新")
                 self.apply_cookie_string(previous_cookie)
                 last_seen = candidate_cookie
@@ -764,6 +855,7 @@ class XianyuLive:
                 async with websockets.connect(self.base_url, extra_headers=headers) as websocket:
                     self.ws = websocket
                     await self.init(websocket)
+                    self.publish_connected_idle_status()
                     
                     # 初始化心跳时间
                     self.last_heartbeat_time = time.time()

@@ -1,3 +1,4 @@
+import json
 import os
 import tempfile
 import time
@@ -123,6 +124,41 @@ class CookieRecoveryTests(unittest.TestCase):
         payload = mocked_post.call_args.kwargs["json"]
         self.assertIn("/tmp/custom-cookies.txt", payload["content"]["text"])
 
+    def test_publish_connected_idle_status_does_not_overwrite_active_recovered_submission(self):
+        recovered_status = {
+            "submission_id": "sub-1",
+            "state": "recovered",
+            "updated_at": "2026-03-21T19:00:01+08:00",
+            "message": "Cookie validated and websocket reconnected",
+        }
+
+        with tempfile.TemporaryDirectory() as tempdir:
+            data_dir = os.path.join(tempdir, "data")
+            os.makedirs(data_dir, exist_ok=True)
+            with open(os.path.join(data_dir, "cookie_submission_state.json"), "w", encoding="utf-8") as f:
+                json.dump(
+                    {
+                        "submission_id": "sub-1",
+                        "sender_open_id": "ou_admin_1",
+                        "requested_at": "2026-03-21T19:00:00+08:00",
+                        "state": "in_progress",
+                    },
+                    f,
+                    ensure_ascii=False,
+                )
+            with open(os.path.join(data_dir, "runtime_status.json"), "w", encoding="utf-8") as f:
+                json.dump(recovered_status, f, ensure_ascii=False)
+
+            with mock.patch("os.getcwd", return_value=tempdir):
+                live = XianyuLive("unb=user_a; foo=1")
+                live.publish_connected_idle_status()
+
+            with open(os.path.join(data_dir, "runtime_status.json"), "r", encoding="utf-8") as f:
+                runtime_status = json.load(f)
+
+        self.assertEqual(runtime_status["state"], "recovered")
+        self.assertEqual(runtime_status["submission_id"], "sub-1")
+
 
 class CookieRecoveryAsyncTests(unittest.IsolatedAsyncioTestCase):
     async def test_handle_message_propagates_cookie_invalid_from_item_info_fetch(self):
@@ -233,3 +269,67 @@ class CookieRecoveryAsyncTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(live.refresh_token.await_count, 2)
                 self.assertEqual(live.cookies_str, valid_new_cookie)
                 self.assertEqual(live.myid, "final_user")
+
+    async def test_runtime_status_file_updates_on_waiting_validating_and_recovered_states(self):
+        old_cookie = "unb=old_user; foo=1"
+        new_cookie = "unb=new_user; foo=2"
+
+        with tempfile.TemporaryDirectory() as tempdir:
+            data_dir = os.path.join(tempdir, "data")
+            os.makedirs(data_dir, exist_ok=True)
+            cookie_path = os.path.join(data_dir, "cookies.txt")
+            submission_state_path = os.path.join(data_dir, "cookie_submission_state.json")
+            runtime_status_path = os.path.join(data_dir, "runtime_status.json")
+
+            with open(cookie_path, "w", encoding="utf-8") as f:
+                f.write(old_cookie)
+
+            with open(submission_state_path, "w", encoding="utf-8") as f:
+                json.dump(
+                    {
+                        "submission_id": "sub-1",
+                        "sender_open_id": "ou_admin_1",
+                        "requested_at": "2026-03-21T19:00:00+08:00",
+                        "state": "in_progress",
+                    },
+                    f,
+                    ensure_ascii=False,
+                )
+
+            with mock.patch("os.getcwd", return_value=tempdir):
+                live = XianyuLive(old_cookie)
+                live.refresh_token = mock.AsyncMock(return_value="token-ok")
+
+                recorded_statuses = []
+                original_publish_runtime_status = live.publish_runtime_status
+
+                def record_and_publish(state, message, submission_id=""):
+                    recorded_statuses.append((state, submission_id))
+                    original_publish_runtime_status(state, message, submission_id=submission_id)
+
+                live.publish_runtime_status = record_and_publish
+
+                sleep_calls = {"count": 0}
+
+                async def fake_sleep(_):
+                    sleep_calls["count"] += 1
+                    if sleep_calls["count"] == 1:
+                        with open(cookie_path, "w", encoding="utf-8") as f:
+                            f.write(new_cookie)
+
+                with mock.patch("asyncio.sleep", side_effect=fake_sleep):
+                    await live.wait_for_cookie_refresh()
+
+            with open(runtime_status_path, "r", encoding="utf-8") as f:
+                runtime_status = json.load(f)
+
+        self.assertEqual(
+            recorded_statuses,
+            [
+                ("waiting_for_cookie", "sub-1"),
+                ("validating_new_cookie", "sub-1"),
+                ("recovered", "sub-1"),
+            ],
+        )
+        self.assertEqual(runtime_status["submission_id"], "sub-1")
+        self.assertEqual(runtime_status["state"], "recovered")

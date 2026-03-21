@@ -1,6 +1,60 @@
 # Progress
 
 ## 2026-03-21
+- Created isolated worktree at `/Users/rael/.config/superpowers/worktrees/XianyuAutoAgent-v1/feat-feishu-app-cookie-control` on branch `feat/feishu-app-cookie-control` to avoid touching the active `main` checkout.
+- Loaded the approved Feishu app cookie-control design and implementation plan, then rewrote `.state/task_plan.md` from the prior cookie-recovery scope to the new control-plane scope.
+- Ran the current full automated baseline before implementation:
+  - `conda run -p '/Users/rael/Library/Mobile Documents/com~apple~CloudDocs/CodeProjects/XianyuAutoAgent-v1/conda-env' python -m unittest discover -s tests -v` -> `Ran 16 tests in 0.018s`, `OK`
+- Implementation notes before coding:
+  - The repo currently has no `services/` package or Feishu app client code.
+  - The existing cookie recovery loop in `main.py` is already file-backed and can serve as the execution plane for a separate control-plane process.
+  - The current dependency set does not include a crypto library for Feishu encrypted callback payloads, so callback-mode support needs to stay minimal and explicit.
+- Added `services/feishu_control_plane.py` with:
+  - env-backed Feishu app config loading and whitelist normalization
+  - token-mode callback verification, challenge handling, and duplicate-event suppression
+  - private-chat authorization, `/help`, `/status`, cookie-shape detection, single-flight submission metadata, atomic cookie replacement, and bounded acknowledgement follow-up
+  - `ThreadingHTTPServer` wiring so the service can run via `python -m services.feishu_control_plane`
+- Added `utils/feishu_client.py` for small, explicit Feishu API calls:
+  - fetch and cache `tenant_access_token`
+  - send text replies to a target `open_id`
+- Added `tests/test_feishu_control_plane.py` coverage for:
+  - config validation
+  - callback bootstrap and trust checks
+  - event deduplication
+  - whitelist and private-chat enforcement
+  - `/help` and `/status`
+  - cookie write correlation and single-flight busy handling
+  - final success/failure acknowledgement mapping
+  - stale-lock recovery on service startup
+- Updated `main.py` so the recovery loop now publishes `data/runtime_status.json` with correlated `submission_id` values for `waiting_for_cookie`, `validating_new_cookie`, `validation_failed`, `recovered`, and connected-idle states.
+- Added operator docs and examples:
+  - `.env.example` now documents the Feishu app config surface
+  - `README.md` now documents callback deployment, the control-plane start command, supported private-chat commands, single-flight behavior, and expected replies
+  - `data/cookie_submission_state.example.json` and `data/runtime_status.example.json` document the file schemas
+  - `.gitignore` now ignores the runtime-generated submission and status files
+- Verification evidence for the Feishu control-plane scope:
+  - `conda run -p '/Users/rael/Library/Mobile Documents/com~apple~CloudDocs/CodeProjects/XianyuAutoAgent-v1/conda-env' python -m unittest tests.test_feishu_control_plane -v` -> `Ran 19 tests`, `OK`
+  - `conda run -p '/Users/rael/Library/Mobile Documents/com~apple~CloudDocs/CodeProjects/XianyuAutoAgent-v1/conda-env' python -m unittest tests.test_cookie_recovery -v` -> `Ran 12 tests`, `OK`
+  - `conda run -p '/Users/rael/Library/Mobile Documents/com~apple~CloudDocs/CodeProjects/XianyuAutoAgent-v1/conda-env' python -m unittest discover -s tests -v` -> latest run `Ran 36 tests in 0.035s`, `OK`
+  - `conda run -p '/Users/rael/Library/Mobile Documents/com~apple~CloudDocs/CodeProjects/XianyuAutoAgent-v1/conda-env' python -m compileall main.py services utils tests` -> exit `0`
+  - Local loopback callback smoke:
+    - started `python -m services.feishu_control_plane` with dummy env on `127.0.0.1:18100`
+    - `curl -sS -X POST 'http://127.0.0.1:18100/feishu/events' -H 'Content-Type: application/json' -d '{"type":"url_verification","challenge":"ping","token":"verify-token"}'` -> `{"challenge": "ping"}`
+- Manual-validation gap:
+  - A real Feishu private-chat submission flow was not executed because the current session has no real `FEISHU_APP_ID` / `FEISHU_APP_SECRET`, no public callback deployment, and no whitelisted admin chat to exercise.
+  - The strongest live evidence available in-session is the local loopback callback smoke plus the automated control-flow tests.
+- Follow-up review fixes:
+  - Verified the reported `recovered -> idle` overwrite race is real under the current status-file design, then added `publish_connected_idle_status()` in `main.py` so a still-active submission's terminal `recovered` / `validation_failed` status is not clobbered by the reconnect idle write.
+  - Verified the early event-dedup / reply-failure path is real, then moved event-id dedup marking to after successful handler completion, made reply sending non-fatal with `_send_reply_safely()`, and reordered cookie-submission startup so the follow-up worker starts before the immediate acknowledgement is attempted.
+  - Added regression coverage for:
+    - failed event handling remaining retryable
+    - cookie submissions still starting follow-up when the immediate Feishu reply fails
+    - connected-idle publication preserving an active submission's recovered status
+- Fresh verification after the review fixes:
+  - `conda run -p '/Users/rael/Library/Mobile Documents/com~apple~CloudDocs/CodeProjects/XianyuAutoAgent-v1/conda-env' python -m unittest tests.test_feishu_control_plane -v` -> `Ran 21 tests`, `OK`
+  - `conda run -p '/Users/rael/Library/Mobile Documents/com~apple~CloudDocs/CodeProjects/XianyuAutoAgent-v1/conda-env' python -m unittest tests.test_cookie_recovery -v` -> `Ran 13 tests`, `OK`
+  - `conda run -p '/Users/rael/Library/Mobile Documents/com~apple~CloudDocs/CodeProjects/XianyuAutoAgent-v1/conda-env' python -m unittest discover -s tests -v` -> latest run `Ran 39 tests in 0.040s`, `OK`
+  - `conda run -p '/Users/rael/Library/Mobile Documents/com~apple~CloudDocs/CodeProjects/XianyuAutoAgent-v1/conda-env' python -m compileall main.py services utils tests` -> exit `0`
 - Created isolated worktree at `/Users/rael/.config/superpowers/worktrees/XianyuAutoAgent-v1/cookie-recovery-alerting` on branch `feat/cookie-recovery-alerting` to avoid touching the dirty `main` workspace.
 - Reviewed the cookie recovery plan and current implementation in `main.py` and `XianyuApis.py`.
 - Confirmed the current blockers match the plan scope: startup cookie handling is interactive, runtime cookie state is initialized only once, and invalid cookies currently trigger stdin prompting plus `sys.exit(1)`.
