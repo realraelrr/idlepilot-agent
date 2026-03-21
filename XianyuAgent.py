@@ -1,5 +1,5 @@
 import re
-from typing import List, Dict
+from typing import Any, Dict, List, Optional
 import os
 from openai import OpenAI
 from loguru import logger
@@ -21,7 +21,7 @@ class XianyuReplyBot:
     def _init_agents(self):
         """初始化各领域Agent"""
         self.agents = {
-            'classify':ClassifyAgent(self.client, self.classify_prompt, self._safe_filter),
+            'classify': ClassifyAgent(self.client, self.classify_prompt, self._safe_filter),
             'price': PriceAgent(self.client, self.price_prompt, self._safe_filter),
             'tech': TechAgent(self.client, self.tech_prompt, self._safe_filter),
             'default': DefaultAgent(self.client, self.default_prompt, self._safe_filter),
@@ -201,6 +201,9 @@ class IntentRouter:
 class BaseAgent:
     """Agent基类"""
 
+    agent_key = "default"
+    valid_reasoning_efforts = {"none", "minimal", "low", "medium", "high", "xhigh"}
+
     def __init__(self, client, system_prompt, safety_filter):
         self.client = client
         self.system_prompt = system_prompt
@@ -208,46 +211,83 @@ class BaseAgent:
 
     def generate(self, user_msg: str, item_desc: str, context: str, bargain_count: int = 0) -> str:
         """生成回复模板方法"""
-        messages = self._build_messages(user_msg, item_desc, context)
-        response = self._call_llm(messages)
+        instruction = self._build_instruction(item_desc, context)
+        response = self._call_llm(user_msg, instruction)
         return self.safety_filter(response)
 
-    def _build_messages(self, user_msg: str, item_desc: str, context: str) -> List[Dict]:
-        """构建消息链"""
-        return [
-            {"role": "system", "content": f"【商品信息】{item_desc}\n【你与客户对话历史】{context}\n{self.system_prompt}"},
-            {"role": "user", "content": user_msg}
-        ]
+    def _build_instruction(self, item_desc: str, context: str) -> str:
+        """构建系统指令"""
+        return f"【商品信息】{item_desc}\n【你与客户对话历史】{context}\n{self.system_prompt}"
 
-    def _call_llm(self, messages: List[Dict], temperature: float = 0.4) -> str:
-        """调用大模型"""
-        response = self.client.chat.completions.create(
-            model=os.getenv("MODEL_NAME", "qwen-max"),
-            messages=messages,
-            temperature=temperature,
-            max_tokens=500,
-            top_p=0.8
-        )
-        return response.choices[0].message.content
+    def _get_reasoning_effort(self) -> Optional[str]:
+        """按 Agent 优先级读取 reasoning 配置"""
+        specific_key = f"{self.agent_key.upper()}_MODEL_REASONING_EFFORT"
+        effort = os.getenv(specific_key) or os.getenv("MODEL_REASONING_EFFORT")
+        if not effort:
+            return None
+
+        normalized = effort.strip().lower()
+        if normalized not in self.valid_reasoning_efforts:
+            logger.warning(f"忽略非法推理强度配置 {specific_key}={effort}")
+            return None
+        return normalized
+
+    def _extract_responses_text(self, response: Any) -> str:
+        """兼容不同响应结构的文本提取"""
+        output_text = getattr(response, "output_text", None)
+        if output_text:
+            return output_text
+
+        for item in getattr(response, "output", []) or []:
+            for content in getattr(item, "content", []) or []:
+                if getattr(content, "type", "") in {"output_text", "text"}:
+                    text = getattr(content, "text", None)
+                    if text:
+                        return text
+        return ""
+
+    def _is_enabled(self, env_key: str, default: str = "false") -> bool:
+        """解析布尔环境变量"""
+        return os.getenv(env_key, default).strip().lower() in {"1", "true", "yes", "on"}
+
+    def _call_llm(
+        self,
+        user_msg: str,
+        instruction: str,
+        temperature: float = 0.4,
+        extra_body: Optional[Dict[str, Any]] = None,
+    ) -> str:
+        """统一调用大模型，使用 responses 协议"""
+        model_name = os.getenv("MODEL_NAME", "qwen-max")
+        reasoning_effort = self._get_reasoning_effort()
+        request_kwargs: Dict[str, Any] = {
+            "model": model_name,
+            "instructions": instruction,
+            "input": user_msg,
+            "temperature": temperature,
+            "max_output_tokens": 500,
+            "top_p": 0.8,
+        }
+        if reasoning_effort:
+            request_kwargs["reasoning"] = {"effort": reasoning_effort}
+        if extra_body:
+            request_kwargs["extra_body"] = extra_body
+
+        response = self.client.responses.create(**request_kwargs)
+        return self._extract_responses_text(response)
 
 
 class PriceAgent(BaseAgent):
     """议价处理Agent"""
 
+    agent_key = "price"
+
     def generate(self, user_msg: str, item_desc: str, context: str, bargain_count: int=0) -> str:
         """重写生成逻辑"""
         dynamic_temp = self._calc_temperature(bargain_count)
-        messages = self._build_messages(user_msg, item_desc, context)
-        messages[0]['content'] += f"\n▲当前议价轮次：{bargain_count}"
-
-        response = self.client.chat.completions.create(
-            model=os.getenv("MODEL_NAME", "qwen-max"),
-            messages=messages,
-            temperature=dynamic_temp,
-            max_tokens=500,
-            top_p=0.8
-        )
-        return self.safety_filter(response.choices[0].message.content)
+        instruction = self._build_instruction(item_desc, context) + f"\n▲当前议价轮次：{bargain_count}"
+        response = self._call_llm(user_msg, instruction, temperature=dynamic_temp)
+        return self.safety_filter(response)
 
     def _calc_temperature(self, bargain_count: int) -> float:
         """动态温度策略"""
@@ -256,23 +296,20 @@ class PriceAgent(BaseAgent):
 
 class TechAgent(BaseAgent):
     """技术咨询Agent"""
+
+    agent_key = "tech"
+
     def generate(self, user_msg: str, item_desc: str, context: str, bargain_count: int=0) -> str:
         """重写生成逻辑"""
-        messages = self._build_messages(user_msg, item_desc, context)
-        # messages[0]['content'] += "\n▲知识库：\n" + self._fetch_tech_specs()
-
-        response = self.client.chat.completions.create(
-            model=os.getenv("MODEL_NAME", "qwen-max"),
-            messages=messages,
+        instruction = self._build_instruction(item_desc, context)
+        extra_body = {"enable_search": True} if self._is_enabled("TECH_ENABLE_SEARCH") else None
+        response = self._call_llm(
+            user_msg,
+            instruction,
             temperature=0.4,
-            max_tokens=500,
-            top_p=0.8,
-            extra_body={
-                "enable_search": True,
-            }
+            extra_body=extra_body
         )
-
-        return self.safety_filter(response.choices[0].message.content)
+        return self.safety_filter(response)
 
 
     # def _fetch_tech_specs(self) -> str:
@@ -283,6 +320,8 @@ class TechAgent(BaseAgent):
 class ClassifyAgent(BaseAgent):
     """意图识别Agent"""
 
+    agent_key = "classify"
+
     def generate(self, **args) -> str:
         response = super().generate(**args)
         return response
@@ -291,7 +330,9 @@ class ClassifyAgent(BaseAgent):
 class DefaultAgent(BaseAgent):
     """默认处理Agent"""
 
-    def _call_llm(self, messages: List[Dict], *args) -> str:
+    agent_key = "default"
+
+    def _call_llm(self, user_msg: str, instruction: str, *args, **kwargs) -> str:
         """限制默认回复长度"""
-        response = super()._call_llm(messages, temperature=0.7)
+        response = super()._call_llm(user_msg, instruction, temperature=0.7, **kwargs)
         return response
