@@ -122,6 +122,32 @@ python -m services.feishu_control_plane
 
 控制面启动后会打印一个手工校验命令，可直接用来验证本地服务和回调路径是否正确。
 
+使用 Docker Compose 启动双进程：
+```bash
+docker compose up -d --build xianyu-main feishu-control-plane
+```
+
+查看运行状态：
+```bash
+docker compose ps
+docker compose logs -f xianyu-main
+docker compose logs -f feishu-control-plane
+```
+
+停止服务：
+```bash
+docker compose down
+```
+
+Docker Compose 部署说明：
+
+- `xianyu-main` 负责闲鱼主循环和 Cookie 自动恢复
+- `feishu-control-plane` 负责飞书私聊回调、管理员鉴权和写入 `data/cookies.txt`
+- 两个容器共享 `./data`、`./prompts`，并通过同一个 `.env` 注入环境变量
+- `feishu-control-plane` 仅映射到宿主机 `127.0.0.1:8100`
+- 现有独立运行的 Cloudflare Tunnel 继续将 `feishu-bot.<你的域名>` 转发到宿主机 `http://localhost:8100`
+- 该 Compose 方案不会占用 `8080`，不会影响你现有的 `sub2api` 服务
+
 ### 飞书 Cookie 控制面
 
 1. 在飞书开放平台创建自建应用并启用机器人能力。

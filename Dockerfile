@@ -48,7 +48,7 @@ WORKDIR /app
 COPY --from=builder /opt/venv /opt/venv
 
 # 创建必要的目录
-RUN mkdir -p data prompts
+RUN mkdir -p data prompts services utils
 
 # 复制示例提示词文件并重命名为正式文件
 COPY prompts/classify_prompt_example.txt prompts/classify_prompt.txt
@@ -58,6 +58,7 @@ COPY prompts/default_prompt_example.txt prompts/default_prompt.txt
 
 # 只复制绝对必要的文件
 COPY main.py XianyuAgent.py XianyuApis.py context_manager.py ./
+COPY services/ services/
 COPY utils/ utils/
 
 # 容器启动时运行的命令
