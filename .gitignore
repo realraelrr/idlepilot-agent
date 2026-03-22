@@ -57,3 +57,4 @@ htmlcov/
 .nox/
 .hypothesis/
 .coverage.* 
+.worktrees/
