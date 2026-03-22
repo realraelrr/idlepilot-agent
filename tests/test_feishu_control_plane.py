@@ -486,6 +486,229 @@ class AckLoopTests(unittest.TestCase):
         self.assertEqual(feishu_client.send_text_message.call_args.args[1], "Cookie 已接收，但校验失败，请重新获取")
 
 
+class ProactiveAlertTests(unittest.TestCase):
+    def create_plane(self, tempdir):
+        from services.feishu_control_plane import FeishuControlPlane, load_feishu_config
+
+        feishu_client = mock.Mock()
+        with mock.patch.dict(os.environ, build_test_env(), clear=True):
+            with mock.patch("os.getcwd", return_value=tempdir):
+                plane = FeishuControlPlane(
+                    load_feishu_config(),
+                    feishu_client=feishu_client,
+                    cookie_file_path=os.path.join(tempdir, "data", "cookies.txt"),
+                    submission_state_path=os.path.join(tempdir, "data", "cookie_submission_state.json"),
+                    runtime_status_path=os.path.join(tempdir, "data", "runtime_status.json"),
+                )
+        return plane, feishu_client, os.path.join(tempdir, "data", "alert_state.json")
+
+    @staticmethod
+    def write_runtime_status(path, payload):
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(payload, f, ensure_ascii=False)
+
+    def test_runtime_status_poller_sends_waiting_for_cookie_alert_to_all_admins_once_per_episode(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            plane, feishu_client, _ = self.create_plane(tempdir)
+            self.write_runtime_status(
+                plane.runtime_status_path,
+                {
+                    "state": "waiting_for_cookie",
+                    "updated_at": "2026-03-22T09:00:00+08:00",
+                    "message": "Cookie invalid, waiting for refresh",
+                    "cookie_invalid_episode_id": "episode-1",
+                },
+            )
+
+            plane.poll_runtime_status_once()
+            plane.poll_runtime_status_once()
+
+        self.assertEqual(feishu_client.send_text_message.call_count, 2)
+        self.assertEqual(
+            {call.args[0] for call in feishu_client.send_text_message.call_args_list},
+            {"ou_admin_1", "ou_admin_2"},
+        )
+        for call in feishu_client.send_text_message.call_args_list:
+            self.assertIn("Cookie", call.args[1])
+            self.assertIn("episode-1", call.args[1])
+
+    def test_persisted_alert_state_prevents_duplicate_waiting_alert_after_restart(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            first_plane, first_client, alert_state_path = self.create_plane(tempdir)
+            self.write_runtime_status(
+                first_plane.runtime_status_path,
+                {
+                    "state": "waiting_for_cookie",
+                    "updated_at": "2026-03-22T09:00:00+08:00",
+                    "message": "Cookie invalid, waiting for refresh",
+                    "cookie_invalid_episode_id": "episode-1",
+                },
+            )
+
+            first_plane.poll_runtime_status_once()
+
+            with open(alert_state_path, "r", encoding="utf-8") as f:
+                persisted_state = json.load(f)
+
+            second_plane, second_client, _ = self.create_plane(tempdir)
+            second_plane.poll_runtime_status_once()
+
+        self.assertEqual(first_client.send_text_message.call_count, 2)
+        self.assertEqual(second_client.send_text_message.call_count, 0)
+        self.assertEqual(persisted_state["last_alerted_waiting_episode_id"], "episode-1")
+
+    def test_terminal_state_allows_next_invalid_cookie_episode_to_alert_again(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            plane, feishu_client, alert_state_path = self.create_plane(tempdir)
+            self.write_runtime_status(
+                plane.runtime_status_path,
+                {
+                    "state": "waiting_for_cookie",
+                    "updated_at": "2026-03-22T09:00:00+08:00",
+                    "message": "Cookie invalid, waiting for refresh",
+                    "cookie_invalid_episode_id": "episode-1",
+                },
+            )
+            plane.poll_runtime_status_once()
+
+            self.write_runtime_status(
+                plane.runtime_status_path,
+                {
+                    "state": "validation_failed",
+                    "updated_at": "2026-03-22T09:01:00+08:00",
+                    "message": "Cookie validation failed",
+                    "cookie_invalid_episode_id": "episode-1",
+                },
+            )
+            plane.poll_runtime_status_once()
+
+            with open(alert_state_path, "r", encoding="utf-8") as f:
+                reset_state = json.load(f)
+
+            self.write_runtime_status(
+                plane.runtime_status_path,
+                {
+                    "state": "waiting_for_cookie",
+                    "updated_at": "2026-03-22T09:02:00+08:00",
+                    "message": "Cookie invalid again, waiting for refresh",
+                    "cookie_invalid_episode_id": "episode-2",
+                },
+            )
+            plane.poll_runtime_status_once()
+
+            with open(alert_state_path, "r", encoding="utf-8") as f:
+                final_state = json.load(f)
+
+        self.assertEqual(reset_state["last_alerted_waiting_episode_id"], "")
+        self.assertEqual(final_state["last_alerted_waiting_episode_id"], "episode-2")
+        self.assertEqual(feishu_client.send_text_message.call_count, 4)
+        alerted_episodes = {
+            "episode-1": False,
+            "episode-2": False,
+        }
+        for call in feishu_client.send_text_message.call_args_list:
+            for episode_id in alerted_episodes:
+                if episode_id in call.args[1]:
+                    alerted_episodes[episode_id] = True
+        self.assertEqual(alerted_episodes, {"episode-1": True, "episode-2": True})
+
+    def test_new_waiting_episode_does_not_alert_before_current_episode_reaches_terminal_state(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            plane, feishu_client, alert_state_path = self.create_plane(tempdir)
+            self.write_runtime_status(
+                plane.runtime_status_path,
+                {
+                    "state": "waiting_for_cookie",
+                    "updated_at": "2026-03-22T09:00:00+08:00",
+                    "message": "Cookie invalid, waiting for refresh",
+                    "cookie_invalid_episode_id": "episode-1",
+                },
+            )
+            plane.poll_runtime_status_once()
+
+            self.write_runtime_status(
+                plane.runtime_status_path,
+                {
+                    "state": "waiting_for_cookie",
+                    "updated_at": "2026-03-22T09:01:00+08:00",
+                    "message": "A second invalid-cookie episode appeared before terminal state",
+                    "cookie_invalid_episode_id": "episode-2",
+                },
+            )
+            plane.poll_runtime_status_once()
+
+            with open(alert_state_path, "r", encoding="utf-8") as f:
+                persisted_state = json.load(f)
+
+        self.assertEqual(feishu_client.send_text_message.call_count, 2)
+        for call in feishu_client.send_text_message.call_args_list:
+            self.assertIn("episode-1", call.args[1])
+            self.assertNotIn("episode-2", call.args[1])
+        self.assertEqual(persisted_state["last_alerted_waiting_episode_id"], "episode-1")
+
+    def test_waiting_state_without_cookie_invalid_episode_id_does_not_send_proactive_alert(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            plane, feishu_client, alert_state_path = self.create_plane(tempdir)
+            self.write_runtime_status(
+                plane.runtime_status_path,
+                {
+                    "state": "waiting_for_cookie",
+                    "updated_at": "2026-03-22T09:00:00+08:00",
+                    "message": "Cookie invalid, waiting for refresh",
+                },
+            )
+            plane.poll_runtime_status_once()
+
+        self.assertFalse(os.path.exists(alert_state_path))
+        feishu_client.send_text_message.assert_not_called()
+
+    def test_partial_admin_delivery_retries_only_missing_admins(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            plane, feishu_client, alert_state_path = self.create_plane(tempdir)
+            feishu_client.send_text_message.side_effect = [
+                None,
+                RuntimeError("temporary feishu send failure"),
+                None,
+            ]
+            self.write_runtime_status(
+                plane.runtime_status_path,
+                {
+                    "state": "waiting_for_cookie",
+                    "updated_at": "2026-03-22T09:00:00+08:00",
+                    "message": "Cookie invalid, waiting for refresh",
+                    "cookie_invalid_episode_id": "episode-1",
+                },
+            )
+
+            plane.poll_runtime_status_once()
+
+            if os.path.exists(alert_state_path):
+                with open(alert_state_path, "r", encoding="utf-8") as f:
+                    first_state = json.load(f)
+            else:
+                first_state = {
+                    "last_alerted_waiting_episode_id": "",
+                    "awaiting_terminal_episode_id": "",
+                    "delivered_admin_open_ids": [],
+                }
+
+            plane.poll_runtime_status_once()
+
+            with open(alert_state_path, "r", encoding="utf-8") as f:
+                second_state = json.load(f)
+
+        self.assertEqual(first_state["last_alerted_waiting_episode_id"], "")
+        self.assertEqual(first_state["awaiting_terminal_episode_id"], "episode-1")
+        self.assertEqual(first_state["delivered_admin_open_ids"], ["ou_admin_1"])
+        self.assertEqual(second_state["last_alerted_waiting_episode_id"], "episode-1")
+        self.assertEqual(second_state["awaiting_terminal_episode_id"], "episode-1")
+        self.assertEqual(second_state["delivered_admin_open_ids"], ["ou_admin_1", "ou_admin_2"])
+        self.assertEqual(
+            [call.args[0] for call in feishu_client.send_text_message.call_args_list],
+            ["ou_admin_1", "ou_admin_2", "ou_admin_2"],
+        )
+
 class ServiceBootstrapTests(unittest.TestCase):
     def test_stale_in_progress_submission_is_marked_timed_out_on_startup(self):
         from services.feishu_control_plane import FeishuControlPlane, load_feishu_config

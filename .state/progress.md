@@ -1,5 +1,47 @@
 # Progress
 
+## 2026-03-22
+- Created isolated worktree at `/Users/rael/Library/Mobile Documents/com~apple~CloudDocs/CodeProjects/XianyuAutoAgent-v1/.worktrees/feishu-app-alert-migration` on branch `feat/feishu-app-alert-migration` after explicitly adding `.worktrees/` to `.gitignore` and verifying Git ignore coverage.
+- Loaded the approved alert-migration plan at `docs/superpowers/plans/2026-03-22-feishu-app-alert-migration-plan.md`, reviewed the current notifier/runtime-status/control-plane code paths, and rewrote `.state/task_plan.md` to the migration scope.
+- Baseline verification before implementation:
+  - `conda run -p "/Users/rael/Library/Mobile Documents/com~apple~CloudDocs/CodeProjects/XianyuAutoAgent-v1/conda-env" python -m unittest tests.test_cookie_recovery tests.test_feishu_control_plane -v` -> `Ran 34 tests in 0.060s`, `OK`
+- Implementation notes before coding:
+  - The current `main.py` still owns webhook notifier state and directly triggers `utils/notifier.py` from `enter_cookie_invalid_state()`.
+  - Runtime status currently correlates submission flow with `submission_id`, but has no explicit invalid-cookie episode identity for deduplicating proactive alerts.
+  - The current Feishu control plane only reacts to inbound admin messages; it has no independent watcher for runtime-status-driven proactive alerts.
+- Task 1 implementation summary:
+  - Removed the legacy webhook notifier dependency from `main.py`, deleted `utils/notifier.py`, and retired the webhook-era cookie recovery tests.
+  - Added stable `cookie_invalid_episode_id` minting and publication so one invalid-cookie episode keeps one explicit identity across `waiting_for_cookie`, `validating_new_cookie`, `validation_failed`, and `recovered`.
+  - Ran review loops on Task 1 and tightened the first regression test so it verifies behavior at the HTTP boundary rather than a removed helper name.
+- Task 1 verification evidence:
+  - `conda run -p "/Users/rael/Library/Mobile Documents/com~apple~CloudDocs/CodeProjects/XianyuAutoAgent-v1/conda-env" python -m unittest tests.test_cookie_recovery.CookieRecoveryTests.test_enter_cookie_invalid_state_sets_flag_without_webhook_notifier_dependency tests.test_cookie_recovery.CookieRecoveryTests.test_invalid_cookie_recovery_episode_publishes_stable_cookie_invalid_episode_id_across_status_updates -v` -> `Ran 2 tests in 0.008s`, `OK`
+  - `conda run -p "/Users/rael/Library/Mobile Documents/com~apple~CloudDocs/CodeProjects/XianyuAutoAgent-v1/conda-env" python -m unittest tests.test_cookie_recovery -v` -> `Ran 13 tests in 0.027s`, `OK`
+- Task 2 implementation summary:
+  - Added proactive runtime-status polling to `services/feishu_control_plane.py` with a dedicated persisted state file `data/alert_state.json`.
+  - Added `poll_runtime_status_once()` plus a thin background watcher wrapper, keeping it separate from cookie submission follow-up logic.
+  - Implemented proactive alert fan-out to all whitelisted admins on `waiting_for_cookie`, deduplicated by `cookie_invalid_episode_id` with compatibility fallback for older runtime-status payloads.
+  - Persisted alert suppression across restart and closed the active episode only after terminal `recovered` / `validation_failed` states.
+  - Added regression coverage for one-alert-per-episode behavior, restart dedup, terminal reset, “do not advance before terminal”, compatibility fallback lifecycle, partial-delivery retry semantics, and the mixed legacy lifecycle where a terminal state carries only `submission_id`.
+  - Ran multiple review loops on Task 2 to fix compatibility edge cases before sign-off.
+- Task 2 verification evidence:
+  - `conda run -p "/Users/rael/Library/Mobile Documents/com~apple~CloudDocs/CodeProjects/XianyuAutoAgent-v1/conda-env" python -m unittest tests.test_feishu_control_plane.ProactiveAlertTests -v` -> latest run `Ran 7 tests in 0.077s`, `OK`
+  - `conda run -p "/Users/rael/Library/Mobile Documents/com~apple~CloudDocs/CodeProjects/XianyuAutoAgent-v1/conda-env" python -m unittest tests.test_feishu_control_plane -v` -> latest run `Ran 28 tests in 0.087s`, `OK`
+- Docs/config cleanup summary:
+  - Added `data/alert_state.json` to `.gitignore`.
+  - Removed `FEISHU_NOTIFY_ENABLED` and `FEISHU_WEBHOOK_URL` from `.env.example`.
+  - Updated `README.md` to document proactive app-bot waiting-state alerting, `cookie_invalid_episode_id`, persisted dedup in `data/alert_state.json`, terminal-state closure semantics, and removal of the legacy webhook path.
+- Final verification evidence:
+  - `rg -n "FEISHU_NOTIFY_ENABLED|FEISHU_WEBHOOK_URL|alert_state|主动告警|waiting_for_cookie|Cookie 已生效|cookie_invalid_episode_id" README.md .env.example .gitignore` -> expected matches only for the new app-bot alert behavior and `data/alert_state.json`; no remaining webhook env references
+  - `conda run -p "/Users/rael/Library/Mobile Documents/com~apple~CloudDocs/CodeProjects/XianyuAutoAgent-v1/conda-env" python -m unittest discover -s tests -v` -> `Ran 46 tests in 0.052s`, `OK`
+  - `conda run -p "/Users/rael/Library/Mobile Documents/com~apple~CloudDocs/CodeProjects/XianyuAutoAgent-v1/conda-env" python -m compileall main.py services utils tests` -> exit `0`
+- Post-review follow-up:
+  - Verified the third-party review finding about partial admin delivery was real: the old proactive alert retry logic resent the same episode to admins who had already received it.
+  - Replaced episode-level retry state with per-admin delivery tracking inside `data/alert_state.json`, so retries now target only the missing admins while preserving restart dedup and terminal-state closure semantics.
+  - Updated the proactive alert regression test to enforce the new behavior and re-ran focused verification:
+    - `conda run -p "/Users/rael/Library/Mobile Documents/com~apple~CloudDocs/CodeProjects/XianyuAutoAgent-v1/conda-env" python -m unittest tests.test_feishu_control_plane.ProactiveAlertTests.test_partial_admin_delivery_retries_only_missing_admins -v` -> `Ran 1 test`, `OK`
+    - `conda run -p "/Users/rael/Library/Mobile Documents/com~apple~CloudDocs/CodeProjects/XianyuAutoAgent-v1/conda-env" python -m unittest tests.test_feishu_control_plane.ProactiveAlertTests -v` -> `Ran 7 tests`, `OK`
+    - `conda run -p "/Users/rael/Library/Mobile Documents/com~apple~CloudDocs/CodeProjects/XianyuAutoAgent-v1/conda-env" python -m unittest tests.test_feishu_control_plane -v` -> `Ran 28 tests`, `OK`
+
 ## 2026-03-21
 - Created isolated worktree at `/Users/rael/.config/superpowers/worktrees/XianyuAutoAgent-v1/feat-feishu-app-cookie-control` on branch `feat/feishu-app-cookie-control` to avoid touching the active `main` checkout.
 - Loaded the approved Feishu app cookie-control design and implementation plan, then rewrote `.state/task_plan.md` from the prior cookie-recovery scope to the new control-plane scope.

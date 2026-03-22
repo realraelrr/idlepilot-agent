@@ -79,8 +79,6 @@ DEFAULT_MODEL_REASONING_EFFORT=默认回复Agent推理强度，优先级高于�
 TECH_ENABLE_SEARCH=True/False #技术Agent是否向模型转发enable_search，默认False
 TOGGLE_KEYWORDS=接管模式切换关键词，默认为句号（输入句号切换为人工接管，再次输入则切换AI接管）
 SIMULATE_HUMAN_TYPING=True/False #模拟人工回复延迟
-FEISHU_NOTIFY_ENABLED=True/False #开启Cookie失效飞书告警（默认False）
-FEISHU_WEBHOOK_URL=飞书机器人Webhook地址
 FEISHU_APP_ID=飞书自建应用的 App ID
 FEISHU_APP_SECRET=飞书自建应用的 App Secret
 FEISHU_ADMIN_OPEN_IDS=允许提交 Cookie 的管理员 open_id，逗号分隔
@@ -101,7 +99,10 @@ COOKIES_STR自行在闲鱼网页端获取cookies(网页端F12打开控制台，�
 运行时不会再回写 `.env` 中的 `COOKIES_STR`，`.env` 仅用于启动兼容兜底。
 如果启用飞书私聊控制面，请把飞书事件订阅模式配置为 `token` 校验，并将回调 URL 指向 `https://<你的域名><FEISHU_CALLBACK_PATH>`；
 版本 1 仅接受白名单管理员的私聊文本消息，不接受群聊提交，不会回显 Cookie 内容；
-控制面会将提交状态写入 `data/cookie_submission_state.json`，主进程会将恢复状态写入 `data/runtime_status.json`；
+控制面会将提交状态写入 `data/cookie_submission_state.json`，主进程会将恢复状态写入 `data/runtime_status.json`，控制面会将主动告警去重状态写入 `data/alert_state.json`；
+主进程在 `waiting_for_cookie`、`validating_new_cookie`、`validation_failed`、`recovered` 状态中会附带稳定的 `cookie_invalid_episode_id`，供控制面做每次失效事件的一次性告警去重；
+控制面会在运行状态进入 `waiting_for_cookie` 时主动私聊所有白名单管理员，同一个 `cookie_invalid_episode_id` 只主动告警一次，即使控制面在中途重启也不会重复推送；
+当同一失效事件进入 `recovered` 或 `validation_failed` 终态后，控制面会关闭当前 episode，后续新的失效事件会重新触发主动告警；
 同一时间只允许一个 Cookie 提交处于校验中，后续提交会收到“稍后重试”提示；
 飞书重复回调会按 `event_id` / `message_id` 去重，避免重复写入和重复回复。
 
@@ -161,6 +162,14 @@ Docker Compose 部署说明：
 - `/help`：返回支持的命令说明
 - `/status`：返回当前恢复状态、更新时间和最近一条运维提示
 - 直接发送完整 Cookie 文本：写入 `data/cookies.txt` 并启动校验
+
+主动告警行为：
+
+- 运行状态切到 `waiting_for_cookie` 时，控制面会主动私聊所有白名单管理员
+- 同一个 `cookie_invalid_episode_id` 只会主动告警一次
+- `data/alert_state.json` 会持久化当前告警去重状态，避免控制面重启后重复发送
+- 当同一 episode 进入 `recovered` 或 `validation_failed` 后，当前告警 suppression 会关闭，下一次失效 episode 可以再次触发主动告警
+- 旧的 webhook 告警路径已移除，告警统一由飞书应用控制面负责
 
 回执行为：
 
