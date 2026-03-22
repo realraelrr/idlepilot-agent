@@ -21,8 +21,10 @@ DEFAULT_STALE_LOCK_SECONDS = 300
 DEFAULT_COOKIE_FILE_PATH = os.path.join("data", "cookies.txt")
 DEFAULT_SUBMISSION_STATE_PATH = os.path.join("data", "cookie_submission_state.json")
 DEFAULT_RUNTIME_STATUS_PATH = os.path.join("data", "runtime_status.json")
+DEFAULT_ALERT_STATE_PATH = os.path.join("data", "alert_state.json")
 DEFAULT_FOLLOWUP_TIMEOUT_SECONDS = 60
 DEFAULT_FOLLOWUP_POLL_INTERVAL_SECONDS = 1
+DEFAULT_RUNTIME_STATUS_POLL_INTERVAL_SECONDS = 1
 
 
 @dataclass(frozen=True)
@@ -137,11 +139,13 @@ class FeishuControlPlane:
         cookie_file_path=None,
         submission_state_path=None,
         runtime_status_path=None,
+        alert_state_path=None,
         event_handler=None,
         now_provider: Callable[[], datetime] | None = None,
         uuid_factory: Callable[[], str] | None = None,
         followup_timeout_seconds: int = DEFAULT_FOLLOWUP_TIMEOUT_SECONDS,
         followup_poll_interval_seconds: int = DEFAULT_FOLLOWUP_POLL_INTERVAL_SECONDS,
+        runtime_status_poll_interval_seconds: int = DEFAULT_RUNTIME_STATUS_POLL_INTERVAL_SECONDS,
     ):
         self.config = config
         self.feishu_client = feishu_client or FeishuClient(config.app_id, config.app_secret)
@@ -152,13 +156,16 @@ class FeishuControlPlane:
             submission_state_path or DEFAULT_SUBMISSION_STATE_PATH
         )
         self.runtime_status_path = _resolve_path(runtime_status_path or DEFAULT_RUNTIME_STATUS_PATH)
+        self.alert_state_path = _resolve_path(alert_state_path or DEFAULT_ALERT_STATE_PATH)
         self.event_handler = event_handler or self._handle_event
         self._now_provider = now_provider or _now_dt
         self._uuid_factory = uuid_factory or (lambda: uuid.uuid4().hex[:6])
         self.followup_timeout_seconds = followup_timeout_seconds
         self.followup_poll_interval_seconds = followup_poll_interval_seconds
+        self.runtime_status_poll_interval_seconds = runtime_status_poll_interval_seconds
         self._processed_event_ids = set()
         self._mutation_lock = threading.Lock()
+        self._alert_state = self._load_alert_state()
         self.recover_stale_submission_lock()
 
     def _verify_payload(self, payload: dict) -> bool:
@@ -329,6 +336,129 @@ class FeishuControlPlane:
     def _write_submission_state(self, payload: dict) -> None:
         _atomic_write_json(self.submission_state_path, payload)
 
+    @staticmethod
+    def _build_default_alert_state() -> dict:
+        return {
+            "last_alerted_waiting_episode_id": "",
+            "awaiting_terminal_episode_id": "",
+            "delivered_admin_open_ids": [],
+        }
+
+    def _load_alert_state(self) -> dict:
+        alert_state = self._build_default_alert_state()
+        persisted_state = _read_json_file(self.alert_state_path)
+        if isinstance(persisted_state, dict):
+            alert_state["last_alerted_waiting_episode_id"] = str(
+                persisted_state.get("last_alerted_waiting_episode_id") or ""
+            ).strip()
+            alert_state["awaiting_terminal_episode_id"] = str(
+                persisted_state.get("awaiting_terminal_episode_id") or ""
+            ).strip()
+            delivered_admin_open_ids = persisted_state.get("delivered_admin_open_ids")
+            if isinstance(delivered_admin_open_ids, list):
+                alert_state["delivered_admin_open_ids"] = sorted(
+                    {
+                        str(open_id).strip()
+                        for open_id in delivered_admin_open_ids
+                        if str(open_id).strip() in self.config.admin_open_ids
+                    }
+                )
+        return alert_state
+
+    def _write_alert_state(self) -> None:
+        _atomic_write_json(self.alert_state_path, self._alert_state)
+
+    @staticmethod
+    def _extract_waiting_episode_id(runtime_status: dict) -> str:
+        return str(runtime_status.get("cookie_invalid_episode_id") or "").strip()
+
+    @staticmethod
+    def _format_waiting_alert(runtime_status: dict, episode_id: str) -> str:
+        message = str(runtime_status.get("message") or "Cookie invalid, waiting for refresh").strip()
+        return (
+            "检测到 App Bot 正在等待新的 Cookie。\n"
+            f"当前状态: {runtime_status.get('state', 'waiting_for_cookie')}\n"
+            f"失效事件: {episode_id}\n"
+            f"说明: {message}"
+        )
+
+    def _persist_waiting_episode_delivery_state(self, episode_id: str, delivered_admin_open_ids: set[str]) -> None:
+        delivered_admin_open_ids = {
+            open_id for open_id in delivered_admin_open_ids if open_id in self.config.admin_open_ids
+        }
+        self._alert_state["last_alerted_waiting_episode_id"] = (
+            episode_id if delivered_admin_open_ids == self.config.admin_open_ids else ""
+        )
+        self._alert_state["awaiting_terminal_episode_id"] = episode_id
+        self._alert_state["delivered_admin_open_ids"] = sorted(delivered_admin_open_ids)
+        self._write_alert_state()
+
+    def _clear_waiting_episode_alert(self, episode_id: str) -> None:
+        if self._alert_state.get("awaiting_terminal_episode_id") != episode_id:
+            return
+        self._alert_state["last_alerted_waiting_episode_id"] = ""
+        self._alert_state["awaiting_terminal_episode_id"] = ""
+        self._alert_state["delivered_admin_open_ids"] = []
+        self._write_alert_state()
+
+    def poll_runtime_status_once(self) -> None:
+        runtime_status = _read_json_file(self.runtime_status_path)
+        if not runtime_status:
+            return
+
+        state = str(runtime_status.get("state") or "").strip()
+        if not state:
+            return
+
+        with self._mutation_lock:
+            awaiting_terminal_episode_id = self._alert_state.get("awaiting_terminal_episode_id", "")
+            episode_id = self._extract_waiting_episode_id(runtime_status)
+            if not episode_id:
+                return
+
+            if state == "waiting_for_cookie":
+                if awaiting_terminal_episode_id and awaiting_terminal_episode_id != episode_id:
+                    return
+                if self._alert_state.get("last_alerted_waiting_episode_id") == episode_id:
+                    return
+                alert_text = self._format_waiting_alert(runtime_status, episode_id)
+                delivered_admin_open_ids = set(
+                    self._alert_state.get("delivered_admin_open_ids", [])
+                    if awaiting_terminal_episode_id == episode_id
+                    else []
+                )
+                pending_admin_open_ids = [
+                    admin_open_id
+                    for admin_open_id in sorted(self.config.admin_open_ids)
+                    if admin_open_id not in delivered_admin_open_ids
+                ]
+                for admin_open_id in pending_admin_open_ids:
+                    if self._send_reply_safely(admin_open_id, alert_text):
+                        delivered_admin_open_ids.add(admin_open_id)
+                self._persist_waiting_episode_delivery_state(episode_id, delivered_admin_open_ids)
+                return
+
+            if state in {"recovered", "validation_failed"}:
+                self._clear_waiting_episode_alert(episode_id)
+
+    def watch_runtime_status_forever(self) -> None:
+        poll_interval = max(self.runtime_status_poll_interval_seconds, 0)
+        while True:
+            try:
+                self.poll_runtime_status_once()
+            except Exception as exc:
+                logger.warning(f"runtime status watcher failed: {exc}")
+
+            if poll_interval <= 0:
+                return
+            time.sleep(poll_interval)
+
+    def start_runtime_status_watcher(self) -> None:
+        threading.Thread(
+            target=self.watch_runtime_status_forever,
+            daemon=True,
+        ).start()
+
     def recover_stale_submission_lock(self) -> None:
         state = self._load_submission_state()
         if state.get("state") != "in_progress":
@@ -454,6 +584,7 @@ def build_manual_validation_command(config: FeishuConfig) -> str:
 def run_control_plane_server():
     config = load_feishu_config()
     control_plane = FeishuControlPlane(config)
+    control_plane.start_runtime_status_watcher()
     server = ThreadingHTTPServer(
         (config.callback_host, config.callback_port),
         build_request_handler(control_plane),

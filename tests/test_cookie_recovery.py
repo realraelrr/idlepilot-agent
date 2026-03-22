@@ -1,3 +1,4 @@
+import asyncio
 import json
 import os
 import tempfile
@@ -7,7 +8,6 @@ from unittest import mock
 
 from main import XianyuLive, check_and_complete_env
 from XianyuApis import XianyuApis, CookieInvalidError
-from utils.notifier import FeishuNotifier
 
 
 class CookieRecoveryTests(unittest.TestCase):
@@ -84,17 +84,14 @@ class CookieRecoveryTests(unittest.TestCase):
         self.assertNotEqual(live.device_id, old_device_id)
         self.assertTrue(live.device_id.endswith("-new_user"))
 
-    def test_cookie_invalid_transition_sends_single_feishu_alert(self):
+    def test_enter_cookie_invalid_state_sets_flag_without_webhook_notifier_dependency(self):
         live = XianyuLive("unb=user_a; foo=1")
-        live.notifier = mock.Mock()
 
-        live.send_cookie_invalid_alert_once()
-        live.send_cookie_invalid_alert_once()
-        live.notifier.send_cookie_invalid_alert.assert_called_once()
+        with mock.patch("requests.post", side_effect=AssertionError("legacy webhook notifier path should not run")):
+            live.enter_cookie_invalid_state("cookie invalid")
 
-        live.reset_cookie_invalid_alert()
-        live.send_cookie_invalid_alert_once()
-        self.assertEqual(live.notifier.send_cookie_invalid_alert.call_count, 2)
+        self.assertTrue(live.cookie_invalid_flag)
+        self.assertTrue(live.cookie_invalid_episode_id)
 
     def test_check_and_complete_env_persists_api_key_to_dotenv(self):
         with tempfile.TemporaryDirectory() as tempdir:
@@ -112,17 +109,6 @@ class CookieRecoveryTests(unittest.TestCase):
                 env_content = f.read()
 
             self.assertIn("API_KEY='test-api-key'", env_content)
-
-    def test_feishu_alert_mentions_configured_cookie_file_path(self):
-        notifier = FeishuNotifier(enabled=True, webhook_url="https://example.com/webhook")
-        response = mock.Mock(status_code=200)
-
-        with mock.patch.dict(os.environ, {"COOKIE_FILE_PATH": "/tmp/custom-cookies.txt"}, clear=False):
-            with mock.patch("requests.post", return_value=response) as mocked_post:
-                notifier.send_cookie_invalid_alert()
-
-        payload = mocked_post.call_args.kwargs["json"]
-        self.assertIn("/tmp/custom-cookies.txt", payload["content"]["text"])
 
     def test_publish_connected_idle_status_does_not_overwrite_active_recovered_submission(self):
         recovered_status = {
@@ -158,6 +144,70 @@ class CookieRecoveryTests(unittest.TestCase):
 
         self.assertEqual(runtime_status["state"], "recovered")
         self.assertEqual(runtime_status["submission_id"], "sub-1")
+
+    def test_invalid_cookie_recovery_episode_publishes_stable_cookie_invalid_episode_id_across_status_updates(self):
+        old_cookie = "unb=old_user; foo=1"
+        invalid_new_cookie = "unb=retry_user; foo=2"
+        valid_new_cookie = "unb=final_user; foo=3"
+
+        with tempfile.TemporaryDirectory() as tempdir:
+            data_dir = os.path.join(tempdir, "data")
+            os.makedirs(data_dir, exist_ok=True)
+            cookie_path = os.path.join(data_dir, "cookies.txt")
+            runtime_status_path = os.path.join(data_dir, "runtime_status.json")
+
+            with open(cookie_path, "w", encoding="utf-8") as f:
+                f.write(old_cookie)
+
+            with mock.patch("os.getcwd", return_value=tempdir):
+                live = XianyuLive(old_cookie)
+                live.refresh_token = mock.AsyncMock(side_effect=[None, "token-ok"])
+
+                recorded_payloads = []
+                original_publish_runtime_status = live.publish_runtime_status
+
+                def record_and_publish(state, message, submission_id=""):
+                    original_publish_runtime_status(state, message, submission_id=submission_id)
+                    with open(runtime_status_path, "r", encoding="utf-8") as f:
+                        recorded_payloads.append(json.load(f))
+
+                live.publish_runtime_status = record_and_publish
+                live.enter_cookie_invalid_state("cookie invalid")
+
+                sleep_calls = {"count": 0}
+
+                async def fake_sleep(_):
+                    sleep_calls["count"] += 1
+                    if sleep_calls["count"] == 1:
+                        with open(cookie_path, "w", encoding="utf-8") as f:
+                            f.write(invalid_new_cookie)
+                    elif sleep_calls["count"] == 2:
+                        with open(cookie_path, "w", encoding="utf-8") as f:
+                            f.write(valid_new_cookie)
+
+                async def run_recovery():
+                    with mock.patch("asyncio.sleep", side_effect=fake_sleep):
+                        await live.wait_for_cookie_refresh()
+
+                asyncio.run(run_recovery())
+
+            episode_ids = [
+                payload.get("cookie_invalid_episode_id")
+                for payload in recorded_payloads
+            ]
+
+        self.assertEqual(
+            [payload["state"] for payload in recorded_payloads],
+            [
+                "waiting_for_cookie",
+                "validating_new_cookie",
+                "validation_failed",
+                "validating_new_cookie",
+                "recovered",
+            ],
+        )
+        self.assertTrue(all(episode_ids))
+        self.assertEqual(len(set(episode_ids)), 1)
 
 
 class CookieRecoveryAsyncTests(unittest.IsolatedAsyncioTestCase):

@@ -11,10 +11,10 @@ from XianyuApis import XianyuApis, CookieInvalidError
 import sys
 import random
 from datetime import datetime, timezone
+from uuid import uuid4
 
 
 from utils.xianyu_utils import generate_mid, generate_uuid, trans_cookies, generate_device_id, decrypt
-from utils.notifier import build_notifier_from_env
 from XianyuAgent import XianyuReplyBot
 from context_manager import ChatContextManager
 
@@ -78,8 +78,6 @@ class XianyuLive:
     def __init__(self, cookies_str=None):
         self.xianyu = XianyuApis()
         self.base_url = 'wss://wss-goofish.dingtalk.com/'
-        self.notifier = build_notifier_from_env()
-        self.cookie_invalid_alert_sent = False
         if cookies_str is None:
             cookies_str = self.load_cookie_string()
         self.cookies_str = ""
@@ -105,6 +103,7 @@ class XianyuLive:
         self.token_refresh_task = None
         self.connection_restart_flag = False  # 连接重启标志
         self.cookie_invalid_flag = False
+        self.cookie_invalid_episode_id = ""
         
         # 人工接管相关配置
         self.manual_mode_conversations = set()  # 存储处于人工接管模式的会话ID
@@ -120,19 +119,14 @@ class XianyuLive:
         # 模拟人工输入配置
         self.simulate_human_typing = os.getenv("SIMULATE_HUMAN_TYPING", "False").lower() == "true"
 
-    def send_cookie_invalid_alert_once(self):
-        if self.cookie_invalid_alert_sent:
-            return False
-        self.cookie_invalid_alert_sent = True
-        return self.notifier.send_cookie_invalid_alert()
-
-    def reset_cookie_invalid_alert(self):
-        self.cookie_invalid_alert_sent = False
+    def create_cookie_invalid_episode_id(self):
+        return f"cookie-invalid-{uuid4().hex}"
 
     def enter_cookie_invalid_state(self, reason):
+        if not self.cookie_invalid_flag:
+            self.cookie_invalid_episode_id = self.create_cookie_invalid_episode_id()
         self.cookie_invalid_flag = True
         logger.error(reason)
-        self.send_cookie_invalid_alert_once()
 
     def read_cookie_file(self):
         cookie_path = ensure_cookie_file_exists()
@@ -174,6 +168,11 @@ class XianyuLive:
         }
         if submission_id:
             payload["submission_id"] = submission_id
+        if (
+            state in {"waiting_for_cookie", "validating_new_cookie", "validation_failed", "recovered"}
+            and self.cookie_invalid_episode_id
+        ):
+            payload["cookie_invalid_episode_id"] = self.cookie_invalid_episode_id
         atomic_write_json(get_runtime_status_path(), payload)
 
     def publish_connected_idle_status(self):
@@ -318,7 +317,6 @@ class XianyuLive:
                     submission_id=submission_id,
                 )
                 logger.info("新cookie验证成功，恢复连接")
-                self.reset_cookie_invalid_alert()
                 return
             except CookieInvalidError:
                 self.publish_runtime_status(
