@@ -1,0 +1,21 @@
+{
+  "manifest_version": 3,
+  "name": "Xianyu Cookie Exporter",
+  "version": "0.1.0",
+  "description": "Export Xianyu/Goofish cookies into a Feishu-ready text string.",
+  "permissions": [
+    "activeTab",
+    "cookies",
+    "clipboardWrite"
+  ],
+  "host_permissions": [
+    "https://*.goofish.com/*",
+    "https://goofish.com/*",
+    "https://*.taobao.com/*",
+    "https://taobao.com/*"
+  ],
+  "action": {
+    "default_title": "Export Xianyu Cookies",
+    "default_popup": "popup.html"
+  }
+}
