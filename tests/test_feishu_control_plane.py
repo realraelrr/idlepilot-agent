@@ -294,6 +294,25 @@ class ControlPlaneTests(unittest.TestCase):
         self.assertEqual(feishu_client.send_text_message.call_args.args[1], "已接收，开始校验")
         plane.start_followup_task.assert_called_once()
 
+    def test_browser_submission_core_writes_source_without_sender_open_id(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            plane, _ = self.create_plane(tempdir, BROWSER_REFRESH_SHARED_SECRET="browser-secret")
+            plane.start_followup_task = mock.Mock()
+
+            submission_id = plane.submit_cookie_update(
+                source="browser_refresh",
+                cookie_text="unb=1; cookie2=2; cna=3; _m_h5_tk=4",
+                sender_open_id="",
+                send_replies=False,
+            )
+
+            with open(plane.submission_state_path, "r", encoding="utf-8") as f:
+                submission_state = json.load(f)
+
+        self.assertEqual(submission_state["submission_id"], submission_id)
+        self.assertEqual(submission_state["source"], "browser_refresh")
+        self.assertEqual(submission_state["sender_open_id"], "")
+
     def test_non_text_private_message_is_rejected(self):
         with tempfile.TemporaryDirectory() as tempdir:
             plane, feishu_client = self.create_plane(tempdir)
@@ -484,6 +503,38 @@ class AckLoopTests(unittest.TestCase):
 
         self.assertEqual(submission_state["state"], "completed")
         self.assertEqual(feishu_client.send_text_message.call_args.args[1], "Cookie 已接收，但校验失败，请重新获取")
+
+    def test_browser_submission_completion_does_not_send_private_chat_reply(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            plane, feishu_client = self.create_plane(tempdir)
+            plane._generate_submission_id = mock.Mock(return_value="sub-1")
+            plane.start_followup_task = (
+                lambda submission_id, sender_open_id: plane.follow_submission_result(
+                    submission_id, sender_open_id
+                )
+            )
+            os.makedirs(os.path.dirname(plane.runtime_status_path), exist_ok=True)
+            with open(plane.runtime_status_path, "w", encoding="utf-8") as f:
+                json.dump(
+                    {
+                        "submission_id": "sub-1",
+                        "state": "recovered",
+                        "cookie_invalid_episode_id": "episode-1",
+                        "updated_at": "2026-04-03T12:00:05+08:00",
+                        "message": "Cookie validated and websocket reconnected",
+                    },
+                    f,
+                    ensure_ascii=False,
+                )
+
+            plane.submit_cookie_update(
+                source="browser_refresh",
+                cookie_text="unb=1; cookie2=2; cna=3; _m_h5_tk=4",
+                sender_open_id="ou_admin_1",
+                send_replies=False,
+            )
+
+        feishu_client.send_text_message.assert_not_called()
 
 
 class ProactiveAlertTests(unittest.TestCase):

@@ -27,6 +27,10 @@ DEFAULT_FOLLOWUP_POLL_INTERVAL_SECONDS = 1
 DEFAULT_RUNTIME_STATUS_POLL_INTERVAL_SECONDS = 1
 
 
+class SubmissionBusyError(Exception):
+    pass
+
+
 @dataclass(frozen=True)
 class FeishuConfig:
     app_id: str
@@ -321,9 +325,17 @@ class FeishuControlPlane:
     def _generate_submission_id(self) -> str:
         return f"{self._now_provider().strftime('%Y%m%dT%H%M%SZ')}-{self._uuid_factory()}"
 
-    def _build_submission_state(self, submission_id: str, sender_open_id: str, state: str, message: str = "") -> dict:
+    def _build_submission_state(
+        self,
+        submission_id: str,
+        sender_open_id: str,
+        state: str,
+        message: str = "",
+        source: str = "feishu_manual",
+    ) -> dict:
         return {
             "submission_id": submission_id,
+            "source": source,
             "sender_open_id": sender_open_id,
             "requested_at": _format_dt(self._now_provider()),
             "state": state,
@@ -480,16 +492,27 @@ class FeishuControlPlane:
             state["updated_at"] = _format_dt(self._now_provider())
             self._write_submission_state(state)
 
-    def _submit_cookie(self, sender_open_id: str, cookie_text: str) -> None:
+    def submit_cookie_update(
+        self,
+        *,
+        source: str,
+        cookie_text: str,
+        sender_open_id: str = "",
+        send_replies: bool = True,
+    ) -> str:
         with self._mutation_lock:
             self.recover_stale_submission_lock()
             existing_state = self._load_submission_state()
             if existing_state.get("state") == "in_progress":
-                self._send_reply_safely(sender_open_id, "已有更新在校验，请稍后重试")
-                return
+                raise SubmissionBusyError()
 
             submission_id = self._generate_submission_id()
-            submission_state = self._build_submission_state(submission_id, sender_open_id, "in_progress")
+            submission_state = self._build_submission_state(
+                submission_id,
+                sender_open_id,
+                "in_progress",
+                source=source,
+            )
             self._write_submission_state(submission_state)
 
             try:
@@ -499,10 +522,26 @@ class FeishuControlPlane:
                 submission_state["message"] = "cookie replace failed"
                 submission_state["updated_at"] = _format_dt(self._now_provider())
                 self._write_submission_state(submission_state)
-                self._send_reply_safely(sender_open_id, "Cookie 写入失败，请稍后重试")
-                return
+                raise
 
-        self.start_followup_task(submission_id, sender_open_id)
+        self.start_followup_task(submission_id, sender_open_id if send_replies else "")
+        return submission_id
+
+    def _submit_cookie(self, sender_open_id: str, cookie_text: str) -> None:
+        try:
+            self.submit_cookie_update(
+                source="feishu_manual",
+                cookie_text=cookie_text,
+                sender_open_id=sender_open_id,
+                send_replies=True,
+            )
+        except SubmissionBusyError:
+            self._send_reply_safely(sender_open_id, "已有更新在校验，请稍后重试")
+            return
+        except OSError:
+            self._send_reply_safely(sender_open_id, "Cookie 写入失败，请稍后重试")
+            return
+
         self._send_reply_safely(sender_open_id, "已接收，开始校验")
 
     def start_followup_task(self, submission_id: str, sender_open_id: str) -> None:
@@ -523,6 +562,7 @@ class FeishuControlPlane:
 
     def follow_submission_result(self, submission_id: str, sender_open_id: str) -> None:
         deadline = time.monotonic() + max(self.followup_timeout_seconds, 0)
+        should_send_reply = bool(sender_open_id)
 
         while time.monotonic() <= deadline:
             runtime_status = _read_json_file(self.runtime_status_path)
@@ -530,11 +570,13 @@ class FeishuControlPlane:
                 status = runtime_status.get("state")
                 if status == "recovered":
                     self._mark_submission_finished("completed", runtime_status.get("message", ""))
-                    self._send_reply_safely(sender_open_id, "Cookie 已生效，连接已恢复")
+                    if should_send_reply:
+                        self._send_reply_safely(sender_open_id, "Cookie 已生效，连接已恢复")
                     return
                 if status == "validation_failed":
                     self._mark_submission_finished("completed", runtime_status.get("message", ""))
-                    self._send_reply_safely(sender_open_id, "Cookie 已接收，但校验失败，请重新获取")
+                    if should_send_reply:
+                        self._send_reply_safely(sender_open_id, "Cookie 已接收，但校验失败，请重新获取")
                     return
 
             if self.followup_poll_interval_seconds <= 0:
@@ -542,7 +584,8 @@ class FeishuControlPlane:
             time.sleep(self.followup_poll_interval_seconds)
 
         self._mark_submission_finished("timed_out", "cookie validation timed out")
-        self._send_reply_safely(sender_open_id, "Cookie 校验超时，请稍后使用 /status 查看结果")
+        if should_send_reply:
+            self._send_reply_safely(sender_open_id, "Cookie 校验超时，请稍后使用 /status 查看结果")
 
 
 def build_request_handler(control_plane: FeishuControlPlane):
