@@ -5,6 +5,8 @@ import unittest
 from collections import deque
 from unittest import mock
 
+import requests
+
 from browser_refresh.cookie_bundle import (
     RECOMMENDED_EXTRA_KEYS,
     RUNTIME_CORE_KEYS,
@@ -516,6 +518,68 @@ class BrowserAgentTests(unittest.TestCase):
         browser_client.prepare_target_page.assert_called_once()
         self.assertEqual(browser_client.classify_page_state.call_count, 2)
         submitter.submit.assert_called_once()
+
+    def test_browser_agent_wraps_browser_client_timeouts_as_recoverable(self):
+        from browser_refresh.agent import BrowserRefreshAgent, BrowserRefreshRecoverableError
+
+        status_reader = mock.Mock(return_value=RuntimeState("waiting_for_cookie", "episode-1", True))
+        browser_client = mock.Mock()
+        browser_client.prepare_target_page.side_effect = RuntimeError("timed out waiting for CDP response")
+        submitter = mock.Mock()
+
+        agent = BrowserRefreshAgent(status_reader=status_reader, browser_client=browser_client, submitter=submitter)
+
+        with self.assertRaisesRegex(BrowserRefreshRecoverableError, "browser client"):
+            agent.run_once()
+
+    def test_browser_agent_wraps_submit_conflicts_as_recoverable(self):
+        from browser_refresh.agent import BrowserRefreshAgent, BrowserRefreshRecoverableError
+
+        status_reader = mock.Mock(return_value=RuntimeState("waiting_for_cookie", "episode-1", True))
+        browser_client = mock.Mock()
+        browser_client.classify_page_state.return_value = "ready"
+        browser_client.get_cookies.return_value = [
+            {"name": "unb", "value": "u1"},
+            {"name": "cookie2", "value": "c2"},
+            {"name": "cna", "value": "cna1"},
+            {"name": "_m_h5_tk", "value": "token_123"},
+        ]
+        response = mock.Mock(status_code=409)
+        submitter = mock.Mock()
+        submitter.submit.side_effect = requests.HTTPError("conflict", response=response)
+
+        agent = BrowserRefreshAgent(status_reader=status_reader, browser_client=browser_client, submitter=submitter)
+
+        with self.assertRaisesRegex(BrowserRefreshRecoverableError, "submit"):
+            agent.run_once()
+
+
+class EntrypointTests(unittest.TestCase):
+    def test_run_agent_iteration_logs_recoverable_failures_and_continues(self):
+        from browser_refresh.agent import BrowserRefreshRecoverableError
+        from browser_refresh.entrypoint import run_agent_iteration
+
+        agent = mock.Mock()
+        agent.run_once.side_effect = [
+            BrowserRefreshRecoverableError("cdp timeout"),
+            None,
+        ]
+        logger = mock.Mock()
+
+        run_agent_iteration(agent, logger=logger)
+        run_agent_iteration(agent, logger=logger)
+
+        self.assertEqual(agent.run_once.call_count, 2)
+        logger.warning.assert_called_once()
+
+    def test_run_agent_iteration_does_not_swallow_programmer_errors(self):
+        from browser_refresh.entrypoint import run_agent_iteration
+
+        agent = mock.Mock()
+        agent.run_once.side_effect = ValueError("bug")
+
+        with self.assertRaises(ValueError):
+            run_agent_iteration(agent, logger=mock.Mock())
 
 
 if __name__ == "__main__":

@@ -3,7 +3,13 @@ from __future__ import annotations
 import logging
 from hashlib import sha256
 
+import requests
+
 from browser_refresh.cookie_bundle import build_runtime_cookie_bundle
+
+
+class BrowserRefreshRecoverableError(RuntimeError):
+    pass
 
 
 class BrowserRefreshAgent:
@@ -20,6 +26,18 @@ class BrowserRefreshAgent:
         existing = self._submitted_fingerprints_by_episode.get(episode_id, set())
         self._submitted_fingerprints_by_episode = {episode_id: existing}
 
+    @staticmethod
+    def _wrap_browser_client_error(step: str, exc: RuntimeError) -> BrowserRefreshRecoverableError:
+        return BrowserRefreshRecoverableError(f"browser client {step} failed: {exc}")
+
+    @staticmethod
+    def _wrap_submit_error(exc: requests.RequestException) -> BrowserRefreshRecoverableError:
+        response = getattr(exc, "response", None)
+        status_code = getattr(response, "status_code", None)
+        if status_code is not None:
+            return BrowserRefreshRecoverableError(f"submit failed with status {status_code}: {exc}")
+        return BrowserRefreshRecoverableError(f"submit failed: {exc}")
+
     def run_once(self) -> None:
         runtime_state = self._status_reader()
         if not runtime_state.is_recovery_active:
@@ -27,9 +45,15 @@ class BrowserRefreshAgent:
             return
 
         if runtime_state.episode_id != self._prepared_episode_id:
-            self._browser_client.prepare_target_page()
+            try:
+                self._browser_client.prepare_target_page()
+            except RuntimeError as exc:
+                raise self._wrap_browser_client_error("prepare_target_page", exc) from exc
             self._transition_episode(runtime_state.episode_id)
-        page_state = self._browser_client.classify_page_state()
+        try:
+            page_state = self._browser_client.classify_page_state()
+        except RuntimeError as exc:
+            raise self._wrap_browser_client_error("classify_page_state", exc) from exc
         if page_state != "ready":
             if page_state == "unknown_error":
                 self._logger.info(
@@ -41,7 +65,12 @@ class BrowserRefreshAgent:
                 self._logger.info("browser refresh page state: %s", page_state)
             return
 
-        bundle = build_runtime_cookie_bundle(self._browser_client.get_cookies())
+        try:
+            browser_cookies = self._browser_client.get_cookies()
+        except RuntimeError as exc:
+            raise self._wrap_browser_client_error("get_cookies", exc) from exc
+
+        bundle = build_runtime_cookie_bundle(browser_cookies)
         if not bundle.has_runtime_core_keys:
             self._logger.info("browser refresh waiting for runtime-ready cookies")
             return
@@ -51,5 +80,8 @@ class BrowserRefreshAgent:
         if fingerprint in seen_fingerprints:
             return
 
-        self._submitter.submit(bundle.text, runtime_state.episode_id)
+        try:
+            self._submitter.submit(bundle.text, runtime_state.episode_id)
+        except requests.RequestException as exc:
+            raise self._wrap_submit_error(exc) from exc
         seen_fingerprints.add(fingerprint)

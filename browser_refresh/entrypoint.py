@@ -4,7 +4,7 @@ import logging
 import os
 import time
 
-from browser_refresh.agent import BrowserRefreshAgent
+from browser_refresh.agent import BrowserRefreshAgent, BrowserRefreshRecoverableError
 from browser_refresh.browser_client import BrowserSessionClient
 from browser_refresh.runtime_state import read_runtime_state
 from browser_refresh.submitter import BrowserCookieSubmitter
@@ -26,8 +26,17 @@ def _read_poll_interval_seconds() -> float:
     return max(float(raw_value), 0.0)
 
 
+def run_agent_iteration(agent: BrowserRefreshAgent, *, logger=None) -> None:
+    active_logger = logger or logging.getLogger(__name__)
+    try:
+        agent.run_once()
+    except BrowserRefreshRecoverableError as exc:
+        active_logger.warning("browser refresh iteration failed recoverably: %s", exc)
+
+
 def main() -> None:
     logging.basicConfig(level=os.getenv("BROWSER_REFRESH_LOG_LEVEL", "INFO").upper())
+    logger = logging.getLogger(__name__)
 
     runtime_status_path = str(
         os.getenv("BROWSER_REFRESH_RUNTIME_STATUS_PATH") or DEFAULT_RUNTIME_STATUS_PATH
@@ -44,5 +53,5 @@ def main() -> None:
     poll_interval_seconds = _read_poll_interval_seconds()
 
     while True:
-        agent.run_once()
+        run_agent_iteration(agent, logger=logger)
         time.sleep(poll_interval_seconds)
