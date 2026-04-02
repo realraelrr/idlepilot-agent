@@ -81,8 +81,15 @@ class _CdpAttachedBrowser:
                     }
                 )
             )
+            deadline = time.monotonic() + self.timeout_seconds
             while True:
-                payload = json.loads(websocket.recv())
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise RuntimeError(f"timed out waiting for CDP response to {method}")
+                try:
+                    payload = json.loads(websocket.recv(timeout=remaining))
+                except TimeoutError as exc:
+                    raise RuntimeError(f"timed out waiting for CDP response to {method}") from exc
                 if payload.get("id") != message_id:
                     continue
                 if payload.get("error"):

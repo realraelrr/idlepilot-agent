@@ -162,14 +162,31 @@ class BrowserSessionTests(unittest.TestCase):
         def __init__(self, responses):
             self._responses = deque(responses)
             self.sent_messages = []
+            self.recv_calls = 0
 
         def send(self, message):
             self.sent_messages.append(json.loads(message))
 
-        def recv(self):
+        def recv(self, timeout=None):
+            self.recv_calls += 1
             if not self._responses:
                 raise AssertionError("unexpected websocket recv")
             return json.dumps(self._responses.popleft())
+
+        def close(self):
+            return None
+
+    class _TimeoutWebSocket:
+        def __init__(self):
+            self.sent_messages = []
+            self.recv_calls = 0
+
+        def send(self, message):
+            self.sent_messages.append(json.loads(message))
+
+        def recv(self, timeout=None):
+            self.recv_calls += 1
+            raise TimeoutError(f"timed out after {timeout}")
 
         def close(self):
             return None
@@ -315,6 +332,32 @@ class BrowserSessionTests(unittest.TestCase):
             [{"name": "unb", "value": "u1", "domain": ".goofish.com"}],
         )
 
+    def test_browser_client_connect_raises_timeout_when_cdp_response_deadline_expires(self):
+        from browser_refresh.browser_client import BrowserSessionClient
+
+        http_client = self._FakeHttpClient(
+            tab_payloads=[
+                [
+                    {
+                        "id": "tab-1",
+                        "type": "page",
+                        "url": "https://www.goofish.com/im",
+                        "webSocketDebuggerUrl": "ws://debug/tab-1",
+                    }
+                ]
+            ]
+        )
+        websocket = self._TimeoutWebSocket()
+
+        client = BrowserSessionClient.connect(
+            "http://127.0.0.1:9222",
+            http_client=http_client,
+            websocket_factory=lambda url: websocket,
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "timed out waiting for CDP response"):
+            client.prepare_target_page()
+
 
 class BrowserSubmitterTests(unittest.TestCase):
     def test_browser_cookie_submitter_posts_to_configured_internal_endpoint(self):
@@ -446,6 +489,33 @@ class BrowserAgentTests(unittest.TestCase):
         browser_client.prepare_target_page.assert_called_once()
         self.assertEqual(browser_client.classify_page_state.call_count, 2)
         submitter.submit.assert_not_called()
+
+    def test_browser_agent_does_not_reprepare_same_episode_after_ready_while_validation_continues(self):
+        from browser_refresh.agent import BrowserRefreshAgent
+
+        status_reader = mock.Mock(
+            side_effect=[
+                RuntimeState("waiting_for_cookie", "episode-1", True),
+                RuntimeState("validating_new_cookie", "episode-1", True),
+            ]
+        )
+        browser_client = mock.Mock()
+        browser_client.classify_page_state.side_effect = ["ready", "ready"]
+        browser_client.get_cookies.return_value = [
+            {"name": "unb", "value": "u1"},
+            {"name": "cookie2", "value": "c2"},
+            {"name": "cna", "value": "cna1"},
+            {"name": "_m_h5_tk", "value": "token_123"},
+        ]
+        submitter = mock.Mock()
+
+        agent = BrowserRefreshAgent(status_reader=status_reader, browser_client=browser_client, submitter=submitter)
+        agent.run_once()
+        agent.run_once()
+
+        browser_client.prepare_target_page.assert_called_once()
+        self.assertEqual(browser_client.classify_page_state.call_count, 2)
+        submitter.submit.assert_called_once()
 
 
 if __name__ == "__main__":
