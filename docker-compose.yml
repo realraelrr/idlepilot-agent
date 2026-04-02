@@ -38,10 +38,9 @@ services:
       dockerfile: browser_refresh/Dockerfile
     container_name: browser-refresh
     restart: unless-stopped
-    env_file:
-      - .env
     environment:
       TZ: Asia/Shanghai
+      BROWSER_REFRESH_SHARED_SECRET: ${BROWSER_REFRESH_SHARED_SECRET:-}
       BROWSER_REFRESH_RUNTIME_STATUS_PATH: /app-runtime-data/runtime_status.json
       BROWSER_REFRESH_DEBUGGER_URL: http://127.0.0.1:9222
       BROWSER_REFRESH_SUBMIT_URL: http://feishu-control-plane:8100/internal/browser-cookie-submit
