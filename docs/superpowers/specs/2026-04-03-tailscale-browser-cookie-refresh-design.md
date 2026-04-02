@@ -99,12 +99,31 @@ The browser-refresh container must not receive write access to:
 
 This makes the control plane's single-writer rule enforceable at the volume boundary rather than relying on convention.
 
+### Runtime Status Read Contract
+The browser-refresh container must consume runtime status through a read-only directory mount, not a standalone single-file bind mount.
+
+Required read behavior:
+- mount the host `data/` directory read-only into the browser-refresh container
+- the agent only reads `runtime_status.json` from that mounted directory
+- on every polling cycle, reopen and re-read the path fresh
+- do not hold a long-lived file descriptor for `runtime_status.json`
+- do not rely on inode stability between reads
+
+This is required because `main.py` writes runtime status with atomic replace semantics, which swaps the inode on every update.
+
 ## Browser Refresh Flow
 
 ### Trigger Condition
-The browser agent should remain idle until `main.py` publishes `state: waiting_for_cookie` in `data/runtime_status.json`.
+The browser agent should remain idle until `main.py` publishes a browser-recovery-active runtime status in `data/runtime_status.json`.
+
+For this design, browser-recovery-active states are:
+- `waiting_for_cookie`
+- `validating_new_cookie`
+- `validation_failed`
 
 The browser agent should key its work to the current `cookie_invalid_episode_id` so repeated checks during the same invalid-cookie episode do not create duplicate auto-submit attempts or duplicate local recovery work.
+
+`validation_failed` remains recovery-active for browser orchestration purposes because the current `main.py` wait loop keeps running after a failed candidate cookie and continues waiting for the next update in the same invalid-cookie episode.
 
 ### Automatic Attempt Flow
 1. Browser agent observes `waiting_for_cookie`
@@ -128,6 +147,17 @@ The browser agent should key its work to the current `cookie_invalid_episode_id`
 6. `main.py` recovers through the existing file-backed loop
 
 This changes the human action from "extract and paste cookie text" to "solve the blocker in the already logged-in remote browser."
+
+### Restart Recovery Rule
+If the browser-refresh container or agent restarts mid-episode, it must reconstruct active recovery from the latest runtime status file instead of waiting for a fresh `waiting_for_cookie` transition.
+
+Required behavior after restart:
+- reopen and read the latest `runtime_status.json`
+- if `cookie_invalid_episode_id` is present
+- and `state` is `waiting_for_cookie`, `validating_new_cookie`, or `validation_failed`
+- resume work for that same episode immediately
+
+This prevents loss of automatic recovery when a restart happens while runtime status is sitting at `validation_failed`.
 
 ### Browser Lifecycle Rule
 The browser-refresh container must run exactly one long-lived Chromium process for this workflow.
@@ -221,6 +251,13 @@ The browser agent should classify the browser session into one of four states:
 
 The browser agent should never pretend a slider problem is a plain cookie failure. In version 1, these classifications are browser-local execution decisions, not separate Feishu notification classes.
 
+### Episode Terminality Rule
+For browser-refresh orchestration, only `recovered` closes the current invalid-cookie episode.
+
+`validation_failed` closes one candidate-cookie validation attempt and may complete one submission follow-up, but it does not close the broader browser-refresh recovery episode while `main.py` remains inside its wait loop.
+
+This requires the proactive waiting-alert lifecycle to stay open across `validation_failed` for the same `cookie_invalid_episode_id`.
+
 ## Control Plane Changes
 
 ### New Protected Auto-Submit Endpoint
@@ -298,6 +335,18 @@ Keeping the control plane as the only cookie-write authority preserves:
 
 Allowing the browser agent to write `data/cookies.txt` directly would create a second mutation path and increase race risk on a shared host.
 
+### Proactive Alert Contract Changes
+The existing proactive waiting-for-cookie alert is still the sole Feishu operator alert in version 1, but its content and lifecycle must change to match the new operator flow.
+
+Required changes:
+- update the waiting-for-cookie alert text to say the operator should use the private remote browser instead of manually extracting and pasting cookies
+- include `BROWSER_REFRESH_URL` directly in that alert
+- keep proactive-alert suppression open across `validation_failed` for the same `cookie_invalid_episode_id`
+- close proactive-alert suppression on `recovered`
+- or replace it when a new `cookie_invalid_episode_id` appears
+
+This keeps the control plane as the only alert owner while aligning the alert lifecycle with the real runtime recovery lifecycle.
+
 ## Tailscale Design
 
 ### Host-Level Deployment
@@ -322,6 +371,17 @@ Required explicit host step:
 
 This explicit Serve step is required because binding `noVNC` to `127.0.0.1` alone does not make it reachable from remote tailnet devices.
 
+### Operator URL Configuration
+The proactive waiting-for-cookie alert must include the private remote-browser entrypoint URL.
+
+Add an explicit operator-facing configuration value, for example:
+
+```env
+BROWSER_REFRESH_URL=https://<tailscale-hostname>.<tailnet>.ts.net
+```
+
+The control plane should use this URL in the waiting-for-cookie alert text so operators know exactly where to go when the workflow requires slider or login intervention.
+
 ## Deployment Model
 
 ### Docker Layout
@@ -334,9 +394,7 @@ Keep the existing services and add one more:
 - project `data/`
   - read/write for `xianyu-main`
   - read/write for `feishu-control-plane`
-  - not mounted read/write into `browser-refresh`
-- runtime-status input for `browser-refresh`
-  - mounted read-only
+  - mounted read-only into `browser-refresh`
 - persistent Chromium profile volume
   - mounted only into `browser-refresh`
 - browser-refresh internal state volume
@@ -363,6 +421,11 @@ Suggested browser startup contract:
 - `x11vnc` and `noVNC` expose that same display
 - the Python agent attaches to the remote debugging port instead of launching a new browser
 
+Suggested runtime-status mount contract:
+- mount the host `data/` directory read-only into the container at a fixed path
+- configure the agent to read `runtime_status.json` from that mounted directory
+- do not mount `runtime_status.json` as a standalone file
+
 Binding to loopback keeps the service off the public interface while still allowing host-level Tailscale exposure.
 
 ## Operator Experience
@@ -380,7 +443,7 @@ Binding to loopback keeps the service off the public interface while still allow
 
 ### Human Verification Recovery
 1. Runtime enters `waiting_for_cookie`
-2. Existing control-plane proactive alert tells the operator to open the private browser session
+2. Existing control-plane proactive alert tells the operator to open the private browser session at `BROWSER_REFRESH_URL`
 4. Operator uses phone or Mac to solve the blocker
 5. Cookie auto-submits after the browser session becomes valid again
 6. Bot recovers without any manual cookie copy/paste
@@ -392,6 +455,8 @@ Binding to loopback keeps the service off the public interface while still allow
 - keep browser-agent polling conservative once human intervention is required
 - browser-refresh emits no direct Feishu notifications in version 1
 - Feishu proactive alert ownership remains in the control plane
+- the waiting-for-cookie alert text must mention the remote-browser workflow and include `BROWSER_REFRESH_URL`
+- the proactive waiting-alert suppression lifecycle must remain open across `validation_failed` for the same episode
 
 ## Verification Strategy
 
@@ -399,6 +464,7 @@ Binding to loopback keeps the service off the public interface while still allow
 - prove that `main.py` still recovers when `data/cookies.txt` is updated by the control plane
 - prove that browser-agent auto-submit reaches the same write path as Feishu manual submission
 - prove that one slider-blocked episode sends one operator alert
+- prove that a browser-agent restart during `validation_failed` resumes the same episode without waiting for a new `waiting_for_cookie` write
 - prove that after manual slider completion in `noVNC`, the browser agent auto-submits and recovery succeeds
 
 ### Security Verification
@@ -410,6 +476,7 @@ Binding to loopback keeps the service off the public interface while still allow
 - container restart should preserve Chromium login state
 - browser-container restart should not break the control plane or main bot
 - stale browser-agent state should not prevent later recovery episodes from alerting and recovering
+- browser-refresh must observe runtime-status updates correctly despite atomic file replacement
 
 ## Tradeoffs
 
