@@ -1,3 +1,6 @@
+import json
+import os
+import tempfile
 import unittest
 
 from browser_refresh.cookie_bundle import (
@@ -6,6 +9,7 @@ from browser_refresh.cookie_bundle import (
     RuntimeCookieBundle,
     build_runtime_cookie_bundle,
 )
+from browser_refresh.runtime_state import RuntimeState, read_runtime_state
 
 
 class RuntimeCookieBundleTests(unittest.TestCase):
@@ -54,6 +58,62 @@ class RuntimeCookieBundleTests(unittest.TestCase):
         self.assertEqual(bundle.missing_recommended_keys, tuple(RECOMMENDED_EXTRA_KEYS))
         self.assertTrue(bundle.has_runtime_core_keys)
         self.assertEqual(bundle.runtime_core_keys, tuple(RUNTIME_CORE_KEYS))
+
+
+class RuntimeStateTests(unittest.TestCase):
+    def test_read_runtime_state_treats_validation_failed_with_episode_id_as_recovery_active(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            data_dir = os.path.join(tempdir, "data")
+            os.makedirs(data_dir, exist_ok=True)
+            status_path = os.path.join(data_dir, "runtime_status.json")
+            with open(status_path, "w", encoding="utf-8") as f:
+                json.dump(
+                    {
+                        "state": "validation_failed",
+                        "updated_at": "2026-04-03T12:00:00+08:00",
+                        "message": "Cookie validation failed",
+                        "cookie_invalid_episode_id": "episode-1",
+                    },
+                    f,
+                )
+
+            state = read_runtime_state(status_path)
+
+        self.assertIsInstance(state, RuntimeState)
+        self.assertTrue(state.is_recovery_active)
+        self.assertEqual(state.episode_id, "episode-1")
+
+    def test_read_runtime_state_reopens_path_each_poll_so_atomic_replace_is_visible(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            data_dir = os.path.join(tempdir, "data")
+            os.makedirs(data_dir, exist_ok=True)
+            status_path = os.path.join(data_dir, "runtime_status.json")
+            with open(status_path, "w", encoding="utf-8") as f:
+                json.dump(
+                    {
+                        "state": "waiting_for_cookie",
+                        "cookie_invalid_episode_id": "episode-1",
+                    },
+                    f,
+                )
+
+            first = read_runtime_state(status_path)
+
+            replacement_path = os.path.join(data_dir, "runtime_status.tmp")
+            with open(replacement_path, "w", encoding="utf-8") as f:
+                json.dump(
+                    {
+                        "state": "recovered",
+                        "cookie_invalid_episode_id": "episode-1",
+                    },
+                    f,
+                )
+            os.replace(replacement_path, status_path)
+
+            second = read_runtime_state(status_path)
+
+        self.assertEqual(first.state, "waiting_for_cookie")
+        self.assertEqual(second.state, "recovered")
 
 
 if __name__ == "__main__":
