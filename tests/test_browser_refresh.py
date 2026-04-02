@@ -23,18 +23,24 @@ class RuntimeCookieBundleTests(unittest.TestCase):
 
         self.assertIsInstance(bundle, RuntimeCookieBundle)
         self.assertEqual(
-            bundle.serialized_cookie_header,
+            bundle.text,
             "unb=first-unb; cookie2=cookie2-value; cna=cna-value; _m_h5_tk=token-value; x5sec=x5sec-value",
         )
         self.assertEqual(
-            [cookie["name"] for cookie in bundle.cookies],
+            [cookie.name for cookie in bundle.cookies],
             ["unb", "cookie2", "cna", "_m_h5_tk", "x5sec"],
         )
-        self.assertEqual(bundle.missing_runtime_core_keys, [])
-        self.assertTrue(bundle.runtime_ready)
+        self.assertEqual(bundle.missing_runtime_core_keys, ())
+        self.assertEqual(bundle.missing_recommended_keys, ("XSRF-TOKEN", "tfstk", "_m_h5_tk_enc"))
+        self.assertTrue(bundle.has_runtime_core_keys)
         self.assertEqual(bundle.runtime_target_urls, tuple(bundle.RUNTIME_TARGET_URLS))
+        self.assertIsInstance(bundle.cookies, tuple)
+        self.assertIsInstance(bundle.missing_runtime_core_keys, tuple)
+        self.assertIsInstance(bundle.missing_recommended_keys, tuple)
+        with self.assertRaises(AttributeError):
+            bundle.cookies[0].value = "mutated"
 
-    def test_build_runtime_cookie_bundle_reports_missing_recommended_extras_without_blocking_runtime_readiness(self):
+    def test_build_runtime_cookie_bundle_reports_missing_recommended_keys_without_blocking_runtime_readiness(self):
         cookies = [
             {"name": "unb", "value": "user-1"},
             {"name": "cookie2", "value": "cookie2-value"},
@@ -44,10 +50,9 @@ class RuntimeCookieBundleTests(unittest.TestCase):
 
         bundle = build_runtime_cookie_bundle(cookies)
 
-        self.assertEqual(bundle.missing_runtime_core_keys, [])
-        self.assertEqual(bundle.missing_recommended_extra_keys, RECOMMENDED_EXTRA_KEYS)
-        self.assertTrue(bundle.runtime_ready)
-        self.assertFalse(bundle.recommended_extras_present)
+        self.assertEqual(bundle.missing_runtime_core_keys, ())
+        self.assertEqual(bundle.missing_recommended_keys, tuple(RECOMMENDED_EXTRA_KEYS))
+        self.assertTrue(bundle.has_runtime_core_keys)
         self.assertEqual(bundle.runtime_core_keys, tuple(RUNTIME_CORE_KEYS))
 
 
