@@ -562,7 +562,11 @@ class FeishuControlPlane:
 
     def follow_submission_result(self, submission_id: str, sender_open_id: str) -> None:
         deadline = time.monotonic() + max(self.followup_timeout_seconds, 0)
-        should_send_reply = bool(sender_open_id)
+        submission_state = self._load_submission_state()
+        reply_open_id = ""
+        if submission_state.get("submission_id") == submission_id:
+            reply_open_id = str(submission_state.get("sender_open_id") or "").strip()
+        should_send_reply = bool(reply_open_id)
 
         while time.monotonic() <= deadline:
             runtime_status = _read_json_file(self.runtime_status_path)
@@ -571,12 +575,12 @@ class FeishuControlPlane:
                 if status == "recovered":
                     self._mark_submission_finished("completed", runtime_status.get("message", ""))
                     if should_send_reply:
-                        self._send_reply_safely(sender_open_id, "Cookie 已生效，连接已恢复")
+                        self._send_reply_safely(reply_open_id, "Cookie 已生效，连接已恢复")
                     return
                 if status == "validation_failed":
                     self._mark_submission_finished("completed", runtime_status.get("message", ""))
                     if should_send_reply:
-                        self._send_reply_safely(sender_open_id, "Cookie 已接收，但校验失败，请重新获取")
+                        self._send_reply_safely(reply_open_id, "Cookie 已接收，但校验失败，请重新获取")
                     return
 
             if self.followup_poll_interval_seconds <= 0:
@@ -585,7 +589,7 @@ class FeishuControlPlane:
 
         self._mark_submission_finished("timed_out", "cookie validation timed out")
         if should_send_reply:
-            self._send_reply_safely(sender_open_id, "Cookie 校验超时，请稍后使用 /status 查看结果")
+            self._send_reply_safely(reply_open_id, "Cookie 校验超时，请稍后使用 /status 查看结果")
 
 
 def build_request_handler(control_plane: FeishuControlPlane):
