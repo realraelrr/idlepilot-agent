@@ -217,6 +217,20 @@ class BrowserSessionTests(unittest.TestCase):
         attached_browser.refresh_tab.assert_called_once()
         attached_browser.open_url.assert_not_called()
 
+    def test_browser_client_waits_for_ready_state_after_refreshing_existing_goofish_tab(self):
+        from browser_refresh.browser_client import BrowserSessionClient
+
+        attached_browser = mock.Mock()
+        attached_browser.find_target_tab.return_value = {"id": "tab-1", "url": "https://www.goofish.com/im"}
+        attached_browser.wait_for_ready_state.return_value = True
+
+        client = BrowserSessionClient(attached_browser=attached_browser)
+        client.prepare_target_page()
+
+        attached_browser.refresh_tab.assert_called_once()
+        attached_browser.wait_for_ready_state.assert_called_once()
+        attached_browser.open_url.assert_not_called()
+
     def test_browser_client_navigates_im_then_root_when_no_goofish_tab_exists(self):
         from browser_refresh.browser_client import BrowserSessionClient
 
@@ -297,7 +311,12 @@ class BrowserSessionTests(unittest.TestCase):
                 ],
             ]
         )
-        websocket = self._FakeWebSocket([{"id": 1, "result": {}}])
+        websocket = self._FakeWebSocket(
+            [
+                {"id": 1, "result": {}},
+                {"id": 2, "result": {"result": {"value": "complete"}}},
+            ]
+        )
 
         client = BrowserSessionClient.connect(
             "http://127.0.0.1:9222",
@@ -306,7 +325,10 @@ class BrowserSessionTests(unittest.TestCase):
         )
         client.prepare_target_page()
 
-        self.assertEqual(http_client.get_calls, [("http://127.0.0.1:9222/json/list", 10)])
+        self.assertEqual(
+            http_client.get_calls,
+            [("http://127.0.0.1:9222/json/list", 10), ("http://127.0.0.1:9222/json/list", 10)],
+        )
         self.assertEqual(websocket.sent_messages[0]["method"], "Page.reload")
 
     def test_browser_client_connect_reads_page_state_and_cookies_over_remote_debugger(self):

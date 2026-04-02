@@ -236,6 +236,7 @@ class BrowserSessionClient:
         target_tab = self._attached_browser.find_target_tab()
         if target_tab is not None:
             self._attached_browser.refresh_tab(target_tab)
+            self._attached_browser.wait_for_ready_state()
             return
 
         for url in (GOOFISH_IM_URL, GOOFISH_ROOT_URL):
