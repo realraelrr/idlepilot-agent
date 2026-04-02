@@ -89,6 +89,10 @@ FEISHU_CALLBACK_MODE=事件校验模式，当前版本建议使用 token
 FEISHU_VERIFICATION_TOKEN=FEISHU_CALLBACK_MODE=token 时必填
 FEISHU_ENCRYPT_KEY=FEISHU_CALLBACK_MODE=encrypt 时使用；当前构建不支持加密事件体
 FEISHU_STALE_LOCK_SECONDS=单飞提交锁的过期秒数，默认 300
+BROWSER_REFRESH_URL=Tailscale Serve 暴露出来的私有 noVNC 地址，例如 https://<device>.<tailnet>.ts.net
+BROWSER_REFRESH_SHARED_SECRET=browser-refresh 容器提交 Cookie 到控制面的共享密钥
+BROWSER_REFRESH_SUBMIT_URL=browser-refresh 提交 Cookie 的内部地址，默认 http://feishu-control-plane:8100/internal/browser-cookie-submit
+BROWSER_REFRESH_POLL_INTERVAL_SECONDS=browser-refresh 轮询 runtime_status.json 的间隔秒数，可选，默认 5
 
 注意：当前版本统一使用 OpenAI `responses` 协议；如需使用其他 API，请确认服务端兼容 `responses` 请求格式，再修改 `.env` 文件中的模型地址和模型名称；
 推理强度支持全局默认值，也支持按 Agent 单独覆盖，未配置时会自动回退到默认行为；
@@ -125,7 +129,7 @@ python -m services.feishu_control_plane
 
 使用 Docker Compose 启动双进程：
 ```bash
-docker compose up -d --build xianyu-main feishu-control-plane
+docker compose up -d --build xianyu-main feishu-control-plane browser-refresh
 ```
 
 查看运行状态：
@@ -133,6 +137,7 @@ docker compose up -d --build xianyu-main feishu-control-plane
 docker compose ps
 docker compose logs -f xianyu-main
 docker compose logs -f feishu-control-plane
+docker compose logs -f browser-refresh
 ```
 
 停止服务：
@@ -144,10 +149,36 @@ Docker Compose 部署说明：
 
 - `xianyu-main` 负责闲鱼主循环和 Cookie 自动恢复
 - `feishu-control-plane` 负责飞书私聊回调、管理员鉴权和写入 `data/cookies.txt`
-- 两个容器共享 `./data`、`./prompts`，并通过同一个 `.env` 注入环境变量
+- `browser-refresh` 负责维持一个持久 Chromium 会话、通过 noVNC 提供人工介入界面，并在页面恢复有效后自动提交浏览器中的最新 Cookie
+- 三个容器共享 `./data`、`./prompts`，并通过同一个 `.env` 注入环境变量
 - `feishu-control-plane` 仅映射到宿主机 `127.0.0.1:8100`
+- `browser-refresh` 的 noVNC 仅映射到宿主机 `127.0.0.1:6080`
 - 现有独立运行的 Cloudflare Tunnel 继续将 `feishu-bot.<你的域名>` 转发到宿主机 `http://localhost:8100`
+- 当前共享 Cloudflare Tunnel 保持不变，不用于暴露 noVNC 或浏览器会话
 - 该 Compose 方案不会占用 `8080`，不会影响你现有的 `sub2api` 服务
+
+### Tailscale Serve 远程浏览器接入
+
+`browser-refresh` 的 noVNC 只监听宿主机 `127.0.0.1:6080`。如果要让运维从 Mac 或手机进入这个私有浏览器，会话入口必须由宿主机级别的 `tailscaled` + `tailscale serve` 提供，不能指望容器自己暴露出去。
+
+推荐配置步骤：
+
+1. 在运行 Docker Compose 的宿主机安装并登录 Tailscale，确保 `tailscaled` 在宿主机上运行。
+2. 在宿主机执行 `tailscale serve`，把 `http://127.0.0.1:6080` 代理到 tailnet 内可访问的 HTTPS 地址。
+3. 把这个地址写入 `.env` 的 `BROWSER_REFRESH_URL`，让飞书等待告警和运维手册都引用同一个远程 noVNC 入口。
+
+示例：
+
+```bash
+tailscale serve --bg 443 http://127.0.0.1:6080
+```
+
+当前运维分工：
+
+- Mac 运维端可以继续使用 Tailscale SSH 登录宿主机，同时也能直接打开 `BROWSER_REFRESH_URL` 进入浏览器
+- 手机运维端不需要 SSH，只需要打开 `BROWSER_REFRESH_URL` 即可进入 noVNC
+- `tailscale serve` 只负责把私有浏览器 UI 从 `127.0.0.1:6080` 代理到 tailnet，不改变 Compose 的 loopback 绑定
+- 现有共享 Cloudflare Tunnel 继续只承接飞书回调入口，不需要修改，也不应该拿来暴露 noVNC
 
 ### 飞书 Cookie 控制面
 
@@ -170,6 +201,14 @@ Docker Compose 部署说明：
 - `data/alert_state.json` 会持久化当前告警去重状态，避免控制面重启后重复发送
 - 当同一 episode 进入 `recovered` 或 `validation_failed` 后，当前告警 suppression 会关闭，下一次失效 episode 可以再次触发主动告警
 - 旧的 webhook 告警路径已移除，告警统一由飞书应用控制面负责
+
+远程浏览器恢复流：
+
+- 现有 Feishu `waiting_for_cookie` 告警现在会直接附带 `BROWSER_REFRESH_URL`，优先引导运维打开远程 noVNC 浏览器
+- 运维在 noVNC 里完成滑块、人机验证或重新登录
+- 浏览器页面回到有效状态后，`browser-refresh` 会自动读取当前 Chromium 会话中的 Cookie，并调用内部 `BROWSER_REFRESH_SUBMIT_URL`
+- 控制面收到自动提交后仍然沿用现有校验闭环，主进程验证成功就进入 `recovered`
+- 手工复制 / 粘贴 Cookie 到飞书私聊仍然保留，但现在只是兜底方案；只有远程浏览器不可用或自动提交流程失败时才需要手工操作
 
 回执行为：
 
