@@ -532,6 +532,19 @@ class BrowserAgentTests(unittest.TestCase):
         with self.assertRaisesRegex(BrowserRefreshRecoverableError, "browser client"):
             agent.run_once()
 
+    def test_browser_agent_wraps_browser_transport_errors_as_recoverable(self):
+        from browser_refresh.agent import BrowserRefreshAgent, BrowserRefreshRecoverableError
+
+        status_reader = mock.Mock(return_value=RuntimeState("waiting_for_cookie", "episode-1", True))
+        browser_client = mock.Mock()
+        browser_client.prepare_target_page.side_effect = requests.ConnectionError("debugger offline")
+        submitter = mock.Mock()
+
+        agent = BrowserRefreshAgent(status_reader=status_reader, browser_client=browser_client, submitter=submitter)
+
+        with self.assertRaisesRegex(BrowserRefreshRecoverableError, "browser client"):
+            agent.run_once()
+
     def test_browser_agent_wraps_submit_conflicts_as_recoverable(self):
         from browser_refresh.agent import BrowserRefreshAgent, BrowserRefreshRecoverableError
 
@@ -555,6 +568,33 @@ class BrowserAgentTests(unittest.TestCase):
 
 
 class EntrypointTests(unittest.TestCase):
+    def test_run_agent_iteration_survives_browser_transport_failures_from_real_agent(self):
+        from browser_refresh.agent import BrowserRefreshAgent
+        from browser_refresh.entrypoint import run_agent_iteration
+
+        status_reader = mock.Mock(
+            side_effect=[
+                RuntimeState("waiting_for_cookie", "episode-1", True),
+                RuntimeState("waiting_for_cookie", "episode-1", True),
+            ]
+        )
+        browser_client = mock.Mock()
+        browser_client.prepare_target_page.side_effect = [
+            requests.ConnectionError("debugger offline"),
+            None,
+        ]
+        browser_client.classify_page_state.return_value = "needs_login"
+        submitter = mock.Mock()
+        logger = mock.Mock()
+
+        agent = BrowserRefreshAgent(status_reader=status_reader, browser_client=browser_client, submitter=submitter)
+
+        run_agent_iteration(agent, logger=logger)
+        run_agent_iteration(agent, logger=logger)
+
+        self.assertEqual(browser_client.prepare_target_page.call_count, 2)
+        logger.warning.assert_called_once()
+
     def test_run_agent_iteration_logs_recoverable_failures_and_continues(self):
         from browser_refresh.agent import BrowserRefreshRecoverableError
         from browser_refresh.entrypoint import run_agent_iteration

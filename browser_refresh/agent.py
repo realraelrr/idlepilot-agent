@@ -5,6 +5,7 @@ from hashlib import sha256
 
 import requests
 
+from browser_refresh.browser_client import BROWSER_CLIENT_RECOVERABLE_EXCEPTIONS
 from browser_refresh.cookie_bundle import build_runtime_cookie_bundle
 
 
@@ -27,7 +28,7 @@ class BrowserRefreshAgent:
         self._submitted_fingerprints_by_episode = {episode_id: existing}
 
     @staticmethod
-    def _wrap_browser_client_error(step: str, exc: RuntimeError) -> BrowserRefreshRecoverableError:
+    def _wrap_browser_client_error(step: str, exc: Exception) -> BrowserRefreshRecoverableError:
         return BrowserRefreshRecoverableError(f"browser client {step} failed: {exc}")
 
     @staticmethod
@@ -47,12 +48,12 @@ class BrowserRefreshAgent:
         if runtime_state.episode_id != self._prepared_episode_id:
             try:
                 self._browser_client.prepare_target_page()
-            except RuntimeError as exc:
+            except BROWSER_CLIENT_RECOVERABLE_EXCEPTIONS as exc:
                 raise self._wrap_browser_client_error("prepare_target_page", exc) from exc
             self._transition_episode(runtime_state.episode_id)
         try:
             page_state = self._browser_client.classify_page_state()
-        except RuntimeError as exc:
+        except BROWSER_CLIENT_RECOVERABLE_EXCEPTIONS as exc:
             raise self._wrap_browser_client_error("classify_page_state", exc) from exc
         if page_state != "ready":
             if page_state == "unknown_error":
@@ -67,7 +68,7 @@ class BrowserRefreshAgent:
 
         try:
             browser_cookies = self._browser_client.get_cookies()
-        except RuntimeError as exc:
+        except BROWSER_CLIENT_RECOVERABLE_EXCEPTIONS as exc:
             raise self._wrap_browser_client_error("get_cookies", exc) from exc
 
         bundle = build_runtime_cookie_bundle(browser_cookies)

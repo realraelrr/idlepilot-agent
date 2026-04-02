@@ -8,6 +8,7 @@ from typing import Any
 from urllib.parse import quote
 
 import requests
+from websockets.exceptions import WebSocketException
 from websockets.sync.client import connect as open_websocket
 
 from browser_refresh.cookie_bundle import RUNTIME_TARGET_URLS
@@ -22,6 +23,12 @@ CDP_INSPECT_EXPRESSION = """(() => ({
     title: document.title,
     html: document.documentElement ? document.documentElement.outerHTML : ""
 }))()"""
+BROWSER_CLIENT_RECOVERABLE_EXCEPTIONS = (
+    RuntimeError,
+    requests.RequestException,
+    OSError,
+    WebSocketException,
+)
 
 
 @dataclass
