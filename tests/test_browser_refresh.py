@@ -463,6 +463,77 @@ class BrowserSessionTests(unittest.TestCase):
         self.assertEqual(client.classify_page_state(), "ready")
         self.assertEqual(http_client.get_calls, [("http://127.0.0.1:9222/json/list", 10), ("http://127.0.0.1:9222/json/list", 10)])
 
+    def test_browser_client_keeps_cached_redirected_login_tab_classifiable(self):
+        from browser_refresh.browser_client import BrowserSessionClient
+
+        prepared_tab = {
+            "id": "tab-1",
+            "type": "page",
+            "url": "https://www.goofish.com/im",
+            "webSocketDebuggerUrl": "ws://debug/tab-1",
+        }
+        redirected_tab = {
+            "id": "tab-1",
+            "type": "page",
+            "url": "https://login.taobao.com/member/login.jhtml",
+            "webSocketDebuggerUrl": "ws://debug/tab-1-login",
+        }
+        http_client = self._FakeHttpClient(
+            tab_payloads=[
+                [prepared_tab],
+                [redirected_tab],
+            ]
+        )
+        goofish_websocket = self._FakeWebSocket(
+            [
+                {
+                    "id": 1,
+                    "result": {
+                        "result": {
+                            "value": {
+                                "url": "https://www.goofish.com/im",
+                                "title": "Goofish",
+                                "html": "<html>ok</html>",
+                            }
+                        }
+                    },
+                }
+            ]
+        )
+        login_websocket = self._FakeWebSocket(
+            [
+                {
+                    "id": 2,
+                    "result": {
+                        "result": {
+                            "value": {
+                                "url": "https://login.taobao.com/member/login.jhtml",
+                                "title": "扫码登录",
+                                "html": "<div>扫码登录</div>",
+                            }
+                        }
+                    },
+                }
+            ]
+        )
+
+        def websocket_factory(url):
+            if url == "ws://debug/tab-1":
+                return goofish_websocket
+            if url == "ws://debug/tab-1-login":
+                return login_websocket
+            raise AssertionError(f"unexpected websocket url {url}")
+
+        client = BrowserSessionClient.connect(
+            "http://127.0.0.1:9222",
+            http_client=http_client,
+            websocket_factory=websocket_factory,
+        )
+
+        self.assertEqual(client.classify_page_state(), "ready")
+        self.assertEqual(client.classify_page_state(), "needs_login")
+        self.assertEqual(http_client.get_calls, [("http://127.0.0.1:9222/json/list", 10), ("http://127.0.0.1:9222/json/list", 10)])
+
 
 class BrowserSubmitterTests(unittest.TestCase):
     def test_browser_cookie_submitter_posts_to_configured_internal_endpoint(self):
@@ -668,6 +739,34 @@ class BrowserAgentTests(unittest.TestCase):
 
         with self.assertRaisesRegex(BrowserRefreshRecoverableError, "submit"):
             agent.run_once()
+
+    def test_browser_agent_clears_prepared_episode_after_same_episode_target_loss(self):
+        from browser_refresh.agent import BrowserRefreshAgent
+        from browser_refresh.browser_client import BrowserClientNoTargetError
+        from browser_refresh.entrypoint import run_agent_iteration
+
+        status_reader = mock.Mock(
+            side_effect=[
+                RuntimeState("waiting_for_cookie", "episode-1", True),
+                RuntimeState("waiting_for_cookie", "episode-1", True),
+            ]
+        )
+        browser_client = mock.Mock()
+        browser_client.prepare_target_page.return_value = None
+        browser_client.classify_page_state.side_effect = [
+            BrowserClientNoTargetError("no attached goofish page is available in the remote debugger session"),
+            "needs_login",
+        ]
+        submitter = mock.Mock()
+        logger = mock.Mock()
+
+        agent = BrowserRefreshAgent(status_reader=status_reader, browser_client=browser_client, submitter=submitter)
+
+        run_agent_iteration(agent, logger=logger)
+        run_agent_iteration(agent, logger=logger)
+
+        self.assertEqual(browser_client.prepare_target_page.call_count, 2)
+        logger.warning.assert_called_once()
 
 
 class EntrypointTests(unittest.TestCase):

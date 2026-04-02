@@ -5,7 +5,7 @@ from hashlib import sha256
 
 import requests
 
-from browser_refresh.browser_client import BROWSER_CLIENT_RECOVERABLE_EXCEPTIONS
+from browser_refresh.browser_client import BROWSER_CLIENT_RECOVERABLE_EXCEPTIONS, BrowserClientNoTargetError
 from browser_refresh.cookie_bundle import build_runtime_cookie_bundle
 
 
@@ -31,6 +31,11 @@ class BrowserRefreshAgent:
     def _wrap_browser_client_error(step: str, exc: Exception) -> BrowserRefreshRecoverableError:
         return BrowserRefreshRecoverableError(f"browser client {step} failed: {exc}")
 
+    def _handle_browser_client_error(self, step: str, exc: Exception) -> BrowserRefreshRecoverableError:
+        if isinstance(exc, BrowserClientNoTargetError):
+            self._prepared_episode_id = ""
+        return self._wrap_browser_client_error(step, exc)
+
     @staticmethod
     def _wrap_submit_error(exc: requests.RequestException) -> BrowserRefreshRecoverableError:
         response = getattr(exc, "response", None)
@@ -49,12 +54,12 @@ class BrowserRefreshAgent:
             try:
                 self._browser_client.prepare_target_page()
             except BROWSER_CLIENT_RECOVERABLE_EXCEPTIONS as exc:
-                raise self._wrap_browser_client_error("prepare_target_page", exc) from exc
+                raise self._handle_browser_client_error("prepare_target_page", exc) from exc
             self._transition_episode(runtime_state.episode_id)
         try:
             page_state = self._browser_client.classify_page_state()
         except BROWSER_CLIENT_RECOVERABLE_EXCEPTIONS as exc:
-            raise self._wrap_browser_client_error("classify_page_state", exc) from exc
+            raise self._handle_browser_client_error("classify_page_state", exc) from exc
         if page_state != "ready":
             if page_state == "unknown_error":
                 self._logger.info(
@@ -69,7 +74,7 @@ class BrowserRefreshAgent:
         try:
             browser_cookies = self._browser_client.get_cookies()
         except BROWSER_CLIENT_RECOVERABLE_EXCEPTIONS as exc:
-            raise self._wrap_browser_client_error("get_cookies", exc) from exc
+            raise self._handle_browser_client_error("get_cookies", exc) from exc
 
         bundle = build_runtime_cookie_bundle(browser_cookies)
         if not bundle.has_runtime_core_keys:

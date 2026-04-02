@@ -31,6 +31,10 @@ BROWSER_CLIENT_RECOVERABLE_EXCEPTIONS = (
 )
 
 
+class BrowserClientNoTargetError(RuntimeError):
+    pass
+
+
 @dataclass
 class _CdpAttachedBrowser:
     debugger_url: str
@@ -64,8 +68,12 @@ class _CdpAttachedBrowser:
         return list(payload) if isinstance(payload, list) else []
 
     @staticmethod
+    def _is_page_tab(tab: dict[str, Any]) -> bool:
+        return str(tab.get("type") or "").strip() == "page"
+
+    @staticmethod
     def _is_goofish_tab(tab: dict[str, Any]) -> bool:
-        if str(tab.get("type") or "").strip() != "page":
+        if not _CdpAttachedBrowser._is_page_tab(tab):
             return False
         return "goofish.com" in str(tab.get("url") or "").lower()
 
@@ -76,13 +84,13 @@ class _CdpAttachedBrowser:
         current_tab_id = str(self._current_tab.get("id") or "").strip()
         live_goofish_tab: dict[str, Any] | None = None
         for tab in self._list_tabs():
-            if not self._is_goofish_tab(tab):
+            if not self._is_page_tab(tab):
                 continue
-            if live_goofish_tab is None:
-                live_goofish_tab = tab
             if str(tab.get("id") or "").strip() == current_tab_id:
                 self._current_tab = tab
                 return tab
+            if live_goofish_tab is None and self._is_goofish_tab(tab):
+                live_goofish_tab = tab
 
         self._current_tab = live_goofish_tab
         return live_goofish_tab
@@ -92,7 +100,7 @@ class _CdpAttachedBrowser:
         if resolved is None:
             resolved = self._refresh_current_tab_reference() or self.find_target_tab()
         if resolved is None:
-            raise RuntimeError("no attached goofish page is available in the remote debugger session")
+            raise BrowserClientNoTargetError("no attached goofish page is available in the remote debugger session")
         return resolved
 
     def _send_cdp_command(self, tab: dict[str, Any], method: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
