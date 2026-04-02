@@ -31,3 +31,29 @@ services:
     volumes:
       - ./data:/app/data
       - ./prompts:/app/prompts
+
+  browser-refresh:
+    build:
+      context: .
+      dockerfile: browser_refresh/Dockerfile
+    container_name: browser-refresh
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      TZ: Asia/Shanghai
+      BROWSER_REFRESH_RUNTIME_STATUS_PATH: /app-runtime-data/runtime_status.json
+      BROWSER_REFRESH_DEBUGGER_URL: http://127.0.0.1:9222
+      BROWSER_REFRESH_SUBMIT_URL: http://feishu-control-plane:8100/internal/browser-cookie-submit
+    depends_on:
+      - feishu-control-plane
+    ports:
+      - "127.0.0.1:6080:6080"
+    volumes:
+      - ./data:/app-runtime-data:ro
+      - browser_refresh_profile:/browser-profile
+      - browser_refresh_state:/browser-state
+
+volumes:
+  browser_refresh_profile:
+  browser_refresh_state:
