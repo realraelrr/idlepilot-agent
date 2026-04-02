@@ -478,7 +478,7 @@ class AckLoopTests(unittest.TestCase):
                     ensure_ascii=False,
                 )
 
-            plane.follow_submission_result("sub-1", "")
+            plane.follow_submission_result("sub-1")
 
             with open(plane.submission_state_path, "r", encoding="utf-8") as f:
                 submission_state = json.load(f)
@@ -513,7 +513,7 @@ class AckLoopTests(unittest.TestCase):
                     ensure_ascii=False,
                 )
 
-            plane.follow_submission_result("sub-1", "ou_admin_1")
+            plane.follow_submission_result("sub-1")
 
             with open(plane.submission_state_path, "r", encoding="utf-8") as f:
                 submission_state = json.load(f)
@@ -526,9 +526,7 @@ class AckLoopTests(unittest.TestCase):
             plane, feishu_client = self.create_plane(tempdir)
             plane._generate_submission_id = mock.Mock(return_value="sub-1")
             plane.start_followup_task = (
-                lambda submission_id, sender_open_id: plane.follow_submission_result(
-                    submission_id, "ou_admin_1"
-                )
+                lambda submission_id: plane.follow_submission_result(submission_id)
             )
             os.makedirs(os.path.dirname(plane.runtime_status_path), exist_ok=True)
             with open(plane.runtime_status_path, "w", encoding="utf-8") as f:

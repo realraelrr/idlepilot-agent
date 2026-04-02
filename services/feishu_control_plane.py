@@ -525,7 +525,7 @@ class FeishuControlPlane:
                 self._write_submission_state(submission_state)
                 raise
 
-        self.start_followup_task(submission_id, persisted_sender_open_id)
+        self.start_followup_task(submission_id)
         return submission_id
 
     def _submit_cookie(self, sender_open_id: str, cookie_text: str) -> None:
@@ -545,10 +545,10 @@ class FeishuControlPlane:
 
         self._send_reply_safely(sender_open_id, "已接收，开始校验")
 
-    def start_followup_task(self, submission_id: str, sender_open_id: str) -> None:
+    def start_followup_task(self, submission_id: str) -> None:
         threading.Thread(
             target=self.follow_submission_result,
-            args=(submission_id, sender_open_id),
+            args=(submission_id,),
             daemon=True,
         ).start()
 
@@ -561,7 +561,7 @@ class FeishuControlPlane:
         state["updated_at"] = _format_dt(self._now_provider())
         self._write_submission_state(state)
 
-    def follow_submission_result(self, submission_id: str, sender_open_id: str) -> None:
+    def follow_submission_result(self, submission_id: str) -> None:
         deadline = time.monotonic() + max(self.followup_timeout_seconds, 0)
         submission_state = self._load_submission_state()
         reply_open_id = ""
