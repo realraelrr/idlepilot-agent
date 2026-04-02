@@ -349,6 +349,17 @@ class ControlPlaneTests(unittest.TestCase):
                 BROWSER_REFRESH_SHARED_SECRET="browser-secret",
             )
             plane.start_followup_task = mock.Mock()
+            os.makedirs(os.path.dirname(plane.runtime_status_path), exist_ok=True)
+            with open(plane.runtime_status_path, "w", encoding="utf-8") as f:
+                json.dump(
+                    {
+                        "state": "waiting_for_cookie",
+                        "cookie_invalid_episode_id": "episode-1",
+                        "updated_at": "2026-04-03T12:00:00+08:00",
+                    },
+                    f,
+                    ensure_ascii=False,
+                )
 
             status_code, payload = plane.handle_browser_cookie_submit_request(
                 headers={"Authorization": "Bearer browser-secret"},
@@ -362,6 +373,63 @@ class ControlPlaneTests(unittest.TestCase):
         self.assertEqual(payload["ok"], True)
         self.assertEqual(submission_state["source"], "browser_refresh")
         feishu_client.send_text_message.assert_not_called()
+
+    def test_browser_cookie_submit_rejects_stale_or_mismatched_episode(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            plane, _ = self.create_plane(
+                tempdir,
+                BROWSER_REFRESH_SHARED_SECRET="browser-secret",
+            )
+            plane.start_followup_task = mock.Mock()
+            os.makedirs(os.path.dirname(plane.runtime_status_path), exist_ok=True)
+            with open(plane.runtime_status_path, "w", encoding="utf-8") as f:
+                json.dump(
+                    {
+                        "state": "waiting_for_cookie",
+                        "cookie_invalid_episode_id": "episode-current",
+                        "updated_at": "2026-04-03T12:00:00+08:00",
+                    },
+                    f,
+                    ensure_ascii=False,
+                )
+
+            status_code, payload = plane.handle_browser_cookie_submit_request(
+                headers={"Authorization": "Bearer browser-secret"},
+                raw_body=b'{"cookie":"unb=1; cookie2=2; cna=3; _m_h5_tk=4","episode_id":"episode-stale"}',
+            )
+
+        self.assertEqual(status_code, 409)
+        self.assertEqual(payload["error"], "browser refresh episode is not active")
+        self.assertFalse(os.path.exists(plane.submission_state_path))
+        plane.start_followup_task.assert_not_called()
+
+    def test_browser_cookie_submit_accepts_active_validation_failed_episode(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            plane, _ = self.create_plane(
+                tempdir,
+                BROWSER_REFRESH_SHARED_SECRET="browser-secret",
+            )
+            plane.start_followup_task = mock.Mock()
+            os.makedirs(os.path.dirname(plane.runtime_status_path), exist_ok=True)
+            with open(plane.runtime_status_path, "w", encoding="utf-8") as f:
+                json.dump(
+                    {
+                        "state": "validation_failed",
+                        "cookie_invalid_episode_id": "episode-1",
+                        "updated_at": "2026-04-03T12:00:05+08:00",
+                    },
+                    f,
+                    ensure_ascii=False,
+                )
+
+            status_code, payload = plane.handle_browser_cookie_submit_request(
+                headers={"Authorization": "Bearer browser-secret"},
+                raw_body=b'{"cookie":"unb=1; cookie2=2; cna=3; _m_h5_tk=4","episode_id":"episode-1"}',
+            )
+
+        self.assertEqual(status_code, 202)
+        self.assertEqual(payload["ok"], True)
+        plane.start_followup_task.assert_called_once()
 
     def test_non_text_private_message_is_rejected(self):
         with tempfile.TemporaryDirectory() as tempdir:

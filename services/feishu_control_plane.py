@@ -26,6 +26,7 @@ DEFAULT_ALERT_STATE_PATH = os.path.join("data", "alert_state.json")
 DEFAULT_FOLLOWUP_TIMEOUT_SECONDS = 60
 DEFAULT_FOLLOWUP_POLL_INTERVAL_SECONDS = 1
 DEFAULT_RUNTIME_STATUS_POLL_INTERVAL_SECONDS = 1
+ACTIVE_BROWSER_RECOVERY_STATES = {"waiting_for_cookie", "validating_new_cookie", "validation_failed"}
 
 
 class SubmissionBusyError(Exception):
@@ -388,6 +389,13 @@ class FeishuControlPlane:
     def _extract_waiting_episode_id(runtime_status: dict) -> str:
         return str(runtime_status.get("cookie_invalid_episode_id") or "").strip()
 
+    def _get_active_browser_recovery_episode_id(self) -> str:
+        runtime_status = _read_json_file(self.runtime_status_path)
+        state = str(runtime_status.get("state") or "").strip()
+        if state not in ACTIVE_BROWSER_RECOVERY_STATES:
+            return ""
+        return self._extract_waiting_episode_id(runtime_status)
+
     def _format_waiting_alert(self, runtime_status: dict, episode_id: str) -> str:
         message = str(runtime_status.get("message") or "Cookie invalid, waiting for refresh").strip()
         browser_guidance = (
@@ -554,6 +562,10 @@ class FeishuControlPlane:
         episode_id = str(payload.get("episode_id") or "").strip()
         if not cookie_text or not episode_id:
             return 400, {"error": "missing browser refresh fields"}
+
+        active_episode_id = self._get_active_browser_recovery_episode_id()
+        if not active_episode_id or active_episode_id != episode_id:
+            return 409, {"error": "browser refresh episode is not active"}
 
         try:
             submission_id = self.submit_cookie_update(
