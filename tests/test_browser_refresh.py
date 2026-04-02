@@ -2,6 +2,7 @@ import json
 import os
 import tempfile
 import unittest
+from unittest import mock
 
 from browser_refresh.cookie_bundle import (
     RECOMMENDED_EXTRA_KEYS,
@@ -127,6 +128,164 @@ class RuntimeStateTests(unittest.TestCase):
         self.assertTrue(first.is_recovery_active)
         self.assertEqual(second.state, "recovered")
         self.assertFalse(second.is_recovery_active)
+
+
+class BrowserSessionTests(unittest.TestCase):
+    def test_browser_client_refreshes_existing_goofish_tab_before_reading_cookies(self):
+        from browser_refresh.browser_client import BrowserSessionClient
+
+        attached_browser = mock.Mock()
+        attached_browser.find_target_tab.return_value = {"id": "tab-1", "url": "https://www.goofish.com/im"}
+
+        client = BrowserSessionClient(attached_browser=attached_browser)
+        client.prepare_target_page()
+
+        attached_browser.refresh_tab.assert_called_once()
+        attached_browser.open_url.assert_not_called()
+
+    def test_browser_client_navigates_im_then_root_when_no_goofish_tab_exists(self):
+        from browser_refresh.browser_client import BrowserSessionClient
+
+        attached_browser = mock.Mock()
+        attached_browser.find_target_tab.return_value = None
+        attached_browser.wait_for_ready_state.side_effect = [False, True]
+
+        client = BrowserSessionClient(attached_browser=attached_browser)
+        client.prepare_target_page()
+
+        self.assertEqual(
+            attached_browser.open_url.call_args_list,
+            [mock.call("https://www.goofish.com/im"), mock.call("https://www.goofish.com/")],
+        )
+
+    def test_browser_client_classifies_slider_page_as_needs_human_verification(self):
+        from browser_refresh.browser_client import BrowserSessionClient
+
+        attached_browser = mock.Mock()
+        attached_browser.inspect_page.return_value = {
+            "url": "https://login.goofish.com/challenge",
+            "title": "请完成验证",
+            "html": "<div>请拖动滑块完成验证</div>",
+        }
+
+        client = BrowserSessionClient(attached_browser=attached_browser)
+
+        self.assertEqual(client.classify_page_state(), "needs_human_verification")
+
+    def test_browser_client_classifies_login_page_as_needs_login(self):
+        from browser_refresh.browser_client import BrowserSessionClient
+
+        attached_browser = mock.Mock()
+        attached_browser.inspect_page.return_value = {
+            "url": "https://login.taobao.com/member/login.jhtml",
+            "title": "扫码登录",
+            "html": "<div>扫码登录</div>",
+        }
+
+        client = BrowserSessionClient(attached_browser=attached_browser)
+
+        self.assertEqual(client.classify_page_state(), "needs_login")
+
+    def test_browser_client_classifies_unexpected_page_as_unknown_error(self):
+        from browser_refresh.browser_client import BrowserSessionClient
+
+        attached_browser = mock.Mock()
+        attached_browser.inspect_page.return_value = {
+            "url": "https://www.goofish.com/error",
+            "title": "502 Bad Gateway",
+            "html": "<html>upstream error</html>",
+        }
+
+        client = BrowserSessionClient(attached_browser=attached_browser)
+
+        self.assertEqual(client.classify_page_state(), "unknown_error")
+
+
+class BrowserSubmitterTests(unittest.TestCase):
+    def test_browser_cookie_submitter_posts_to_configured_internal_endpoint(self):
+        from browser_refresh.submitter import BrowserCookieSubmitter
+
+        transport = mock.Mock()
+        submitter = BrowserCookieSubmitter(
+            submit_url="http://feishu-control-plane:8100/internal/browser-cookie-submit",
+            shared_secret="browser-secret",
+            transport=transport,
+        )
+
+        submitter.submit("unb=1; cookie2=2; cna=3; _m_h5_tk=4", "episode-1")
+
+        transport.post.assert_called_once_with(
+            "http://feishu-control-plane:8100/internal/browser-cookie-submit",
+            headers={"Authorization": "Bearer browser-secret"},
+            json={
+                "source": "browser-refresh",
+                "cookie": "unb=1; cookie2=2; cna=3; _m_h5_tk=4",
+                "episode_id": "episode-1",
+            },
+            timeout=10,
+        )
+
+
+class BrowserAgentTests(unittest.TestCase):
+    def test_browser_agent_resubmits_same_episode_after_validation_failed_when_cookie_bundle_changes(self):
+        from browser_refresh.agent import BrowserRefreshAgent
+
+        status_reader = mock.Mock(
+            side_effect=[
+                RuntimeState("waiting_for_cookie", "episode-1", True),
+                RuntimeState("validation_failed", "episode-1", True),
+            ]
+        )
+        browser_client = mock.Mock()
+        browser_client.prepare_target_page.return_value = None
+        browser_client.classify_page_state.side_effect = ["ready", "ready"]
+        browser_client.get_cookies.side_effect = [
+            [
+                {"name": "unb", "value": "u1"},
+                {"name": "cookie2", "value": "c2"},
+                {"name": "cna", "value": "cna1"},
+                {"name": "_m_h5_tk", "value": "token_123"},
+            ],
+            [
+                {"name": "unb", "value": "u2"},
+                {"name": "cookie2", "value": "c2"},
+                {"name": "cna", "value": "cna1"},
+                {"name": "_m_h5_tk", "value": "token_456"},
+            ],
+        ]
+        submitter = mock.Mock()
+
+        agent = BrowserRefreshAgent(status_reader=status_reader, browser_client=browser_client, submitter=submitter)
+        agent.run_once()
+        agent.run_once()
+
+        self.assertEqual(submitter.submit.call_count, 2)
+
+    def test_browser_agent_does_not_resubmit_same_bundle_twice_in_one_episode(self):
+        from browser_refresh.agent import BrowserRefreshAgent
+
+        status_reader = mock.Mock(
+            side_effect=[
+                RuntimeState("waiting_for_cookie", "episode-1", True),
+                RuntimeState("validation_failed", "episode-1", True),
+            ]
+        )
+        browser_client = mock.Mock()
+        browser_client.prepare_target_page.return_value = None
+        browser_client.classify_page_state.side_effect = ["ready", "ready"]
+        browser_client.get_cookies.return_value = [
+            {"name": "unb", "value": "u1"},
+            {"name": "cookie2", "value": "c2"},
+            {"name": "cna", "value": "cna1"},
+            {"name": "_m_h5_tk", "value": "token_123"},
+        ]
+        submitter = mock.Mock()
+
+        agent = BrowserRefreshAgent(status_reader=status_reader, browser_client=browser_client, submitter=submitter)
+        agent.run_once()
+        agent.run_once()
+
+        submitter.submit.assert_called_once()
 
 
 if __name__ == "__main__":
