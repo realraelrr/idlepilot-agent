@@ -530,7 +530,7 @@ class AckLoopTests(unittest.TestCase):
             plane.submit_cookie_update(
                 source="browser_refresh",
                 cookie_text="unb=1; cookie2=2; cna=3; _m_h5_tk=4",
-                sender_open_id="ou_admin_1",
+                sender_open_id="",
                 send_replies=False,
             )
 
