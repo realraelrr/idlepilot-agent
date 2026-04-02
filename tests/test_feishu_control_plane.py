@@ -313,6 +313,23 @@ class ControlPlaneTests(unittest.TestCase):
         self.assertEqual(submission_state["source"], "browser_refresh")
         self.assertEqual(submission_state["sender_open_id"], "")
 
+    def test_submission_core_clears_persisted_reply_target_when_send_replies_disabled(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            plane, _ = self.create_plane(tempdir, BROWSER_REFRESH_SHARED_SECRET="browser-secret")
+            plane.start_followup_task = mock.Mock()
+
+            plane.submit_cookie_update(
+                source="browser_refresh",
+                cookie_text="unb=1; cookie2=2; cna=3; _m_h5_tk=4",
+                sender_open_id="ou_admin_1",
+                send_replies=False,
+            )
+
+            with open(plane.submission_state_path, "r", encoding="utf-8") as f:
+                submission_state = json.load(f)
+
+        self.assertEqual(submission_state["sender_open_id"], "")
+
     def test_non_text_private_message_is_rejected(self):
         with tempfile.TemporaryDirectory() as tempdir:
             plane, feishu_client = self.create_plane(tempdir)

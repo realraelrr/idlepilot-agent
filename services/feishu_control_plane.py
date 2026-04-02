@@ -500,6 +500,7 @@ class FeishuControlPlane:
         sender_open_id: str = "",
         send_replies: bool = True,
     ) -> str:
+        persisted_sender_open_id = sender_open_id if send_replies else ""
         with self._mutation_lock:
             self.recover_stale_submission_lock()
             existing_state = self._load_submission_state()
@@ -509,7 +510,7 @@ class FeishuControlPlane:
             submission_id = self._generate_submission_id()
             submission_state = self._build_submission_state(
                 submission_id,
-                sender_open_id,
+                persisted_sender_open_id,
                 "in_progress",
                 source=source,
             )
@@ -524,7 +525,7 @@ class FeishuControlPlane:
                 self._write_submission_state(submission_state)
                 raise
 
-        self.start_followup_task(submission_id, sender_open_id if send_replies else "")
+        self.start_followup_task(submission_id, persisted_sender_open_id)
         return submission_id
 
     def _submit_cookie(self, sender_open_id: str, cookie_text: str) -> None:
