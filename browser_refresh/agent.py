@@ -12,16 +12,21 @@ class BrowserRefreshAgent:
         self._browser_client = browser_client
         self._submitter = submitter
         self._submitted_fingerprints_by_episode: dict[str, set[str]] = {}
+        self._parked_episode_id = ""
         self._logger = logger or logging.getLogger(__name__)
 
     def run_once(self) -> None:
         runtime_state = self._status_reader()
         if not runtime_state.is_recovery_active:
+            self._parked_episode_id = ""
             return
 
-        self._browser_client.prepare_target_page()
+        if runtime_state.episode_id != self._parked_episode_id:
+            self._browser_client.prepare_target_page()
         page_state = self._browser_client.classify_page_state()
         if page_state != "ready":
+            if page_state in {"needs_human_verification", "needs_login"}:
+                self._parked_episode_id = runtime_state.episode_id
             if page_state == "unknown_error":
                 self._logger.info(
                     "browser refresh page state: %s snapshot=%s",

@@ -1,40 +1,160 @@
 from __future__ import annotations
 
+import itertools
+import json
+import time
 from dataclasses import dataclass
 from typing import Any
+from urllib.parse import quote
+
+import requests
+from websockets.sync.client import connect as open_websocket
+
+from browser_refresh.cookie_bundle import RUNTIME_TARGET_URLS
 
 
 GOOFISH_IM_URL = "https://www.goofish.com/im"
 GOOFISH_ROOT_URL = "https://www.goofish.com/"
+CDP_TIMEOUT_SECONDS = 10
+CDP_READY_POLL_INTERVAL_SECONDS = 0.25
+CDP_INSPECT_EXPRESSION = """(() => ({
+    url: window.location.href,
+    title: document.title,
+    html: document.documentElement ? document.documentElement.outerHTML : ""
+}))()"""
 
 
 @dataclass
-class _RemoteDebuggerBrowser:
+class _CdpAttachedBrowser:
     debugger_url: str
+    http_client: Any
+    websocket_factory: Any
+    timeout_seconds: float = CDP_TIMEOUT_SECONDS
+    _current_tab: dict[str, Any] | None = None
 
-    def _unsupported(self, operation: str) -> None:
-        raise RuntimeError(
-            f"{operation} requires an attached browser transport for {self.debugger_url}; "
-            "BrowserSessionClient.connect() does not launch Chromium or implement a full CDP client in Task 5."
-        )
+    def __post_init__(self) -> None:
+        self._message_ids = itertools.count(1)
 
-    def find_target_tab(self) -> None:
+    def _url_for(self, path: str) -> str:
+        return f"{self.debugger_url.rstrip('/')}/{path.lstrip('/')}"
+
+    def _get_json(self, path: str) -> Any:
+        response = self.http_client.get(self._url_for(path), timeout=self.timeout_seconds)
+        raise_for_status = getattr(response, "raise_for_status", None)
+        if callable(raise_for_status):
+            raise_for_status()
+        return response.json()
+
+    def _put_json(self, path: str) -> Any:
+        response = self.http_client.put(self._url_for(path), timeout=self.timeout_seconds)
+        raise_for_status = getattr(response, "raise_for_status", None)
+        if callable(raise_for_status):
+            raise_for_status()
+        return response.json()
+
+    @staticmethod
+    def _is_goofish_tab(tab: dict[str, Any]) -> bool:
+        if str(tab.get("type") or "").strip() != "page":
+            return False
+        return "goofish.com" in str(tab.get("url") or "").lower()
+
+    def _ensure_tab(self, tab: dict[str, Any] | None = None) -> dict[str, Any]:
+        resolved = tab or self._current_tab or self.find_target_tab()
+        if resolved is None:
+            raise RuntimeError("no attached goofish page is available in the remote debugger session")
+        return resolved
+
+    def _send_cdp_command(self, tab: dict[str, Any], method: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
+        websocket_url = str(tab.get("webSocketDebuggerUrl") or "").strip()
+        if not websocket_url:
+            raise RuntimeError(f"tab {tab.get('id', '<unknown>')} is missing webSocketDebuggerUrl")
+
+        message_id = next(self._message_ids)
+        websocket = self.websocket_factory(websocket_url)
+        try:
+            websocket.send(
+                json.dumps(
+                    {
+                        "id": message_id,
+                        "method": method,
+                        "params": params or {},
+                    }
+                )
+            )
+            while True:
+                payload = json.loads(websocket.recv())
+                if payload.get("id") != message_id:
+                    continue
+                if payload.get("error"):
+                    raise RuntimeError(f"CDP {method} failed: {payload['error']}")
+                return payload.get("result") or {}
+        finally:
+            close = getattr(websocket, "close", None)
+            if callable(close):
+                close()
+
+    def find_target_tab(self) -> dict[str, Any] | None:
+        for tab in self._get_json("/json/list") or []:
+            if self._is_goofish_tab(tab):
+                self._current_tab = tab
+                return tab
         return None
 
     def refresh_tab(self, tab: Any | None = None) -> None:
-        self._unsupported("refresh_tab")
+        resolved_tab = self._ensure_tab(tab)
+        self._send_cdp_command(resolved_tab, "Page.reload", {"ignoreCache": True})
+        self._current_tab = resolved_tab
 
     def open_url(self, url: str) -> None:
-        self._unsupported(f"open_url({url})")
+        encoded_url = quote(url, safe=":/?=&")
+        new_tab = self._put_json(f"/json/new?{encoded_url}")
+        if isinstance(new_tab, dict):
+            self._current_tab = new_tab
 
     def wait_for_ready_state(self) -> bool:
-        self._unsupported("wait_for_ready_state")
+        deadline = time.monotonic() + self.timeout_seconds
+        while time.monotonic() < deadline:
+            tab = self._ensure_tab()
+            result = self._send_cdp_command(
+                tab,
+                "Runtime.evaluate",
+                {
+                    "expression": "document.readyState",
+                    "returnByValue": True,
+                },
+            )
+            ready_state = str((result.get("result") or {}).get("value") or "").strip().lower()
+            if ready_state == "complete":
+                return True
+            time.sleep(CDP_READY_POLL_INTERVAL_SECONDS)
+        return False
 
     def inspect_page(self) -> dict[str, str]:
-        self._unsupported("inspect_page")
+        tab = self._ensure_tab()
+        result = self._send_cdp_command(
+            tab,
+            "Runtime.evaluate",
+            {
+                "expression": CDP_INSPECT_EXPRESSION,
+                "returnByValue": True,
+            },
+        )
+        value = (result.get("result") or {}).get("value") or {}
+        return {
+            "url": str(value.get("url") or ""),
+            "title": str(value.get("title") or ""),
+            "html": str(value.get("html") or ""),
+        }
 
     def get_cookies(self) -> list[dict[str, object]]:
-        self._unsupported("get_cookies")
+        tab = self._ensure_tab()
+        result = self._send_cdp_command(
+            tab,
+            "Network.getCookies",
+            {"urls": list(RUNTIME_TARGET_URLS)},
+        )
+        cookies = result.get("cookies") or []
+        return list(cookies) if isinstance(cookies, list) else []
 
 
 class BrowserSessionClient:
@@ -44,11 +164,23 @@ class BrowserSessionClient:
         self._last_page_snapshot: dict[str, str] = {}
 
     @classmethod
-    def connect(cls, debugger_url: str) -> "BrowserSessionClient":
+    def connect(
+        cls,
+        debugger_url: str,
+        *,
+        http_client: Any | None = None,
+        websocket_factory: Any | None = None,
+    ) -> "BrowserSessionClient":
         normalized_url = str(debugger_url or "").strip()
         if not normalized_url:
             raise ValueError("debugger_url is required")
-        return cls(attached_browser=_RemoteDebuggerBrowser(debugger_url=normalized_url))
+        return cls(
+            attached_browser=_CdpAttachedBrowser(
+                debugger_url=normalized_url,
+                http_client=http_client or requests,
+                websocket_factory=websocket_factory or open_websocket,
+            )
+        )
 
     @property
     def last_page_snapshot(self) -> dict[str, str]:

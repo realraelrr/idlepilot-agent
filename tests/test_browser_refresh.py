@@ -2,6 +2,7 @@ import json
 import os
 import tempfile
 import unittest
+from collections import deque
 from unittest import mock
 
 from browser_refresh.cookie_bundle import (
@@ -131,6 +132,48 @@ class RuntimeStateTests(unittest.TestCase):
 
 
 class BrowserSessionTests(unittest.TestCase):
+    class _FakeHttpResponse:
+        def __init__(self, payload):
+            self._payload = payload
+
+        def json(self):
+            return self._payload
+
+        def raise_for_status(self):
+            return None
+
+    class _FakeHttpClient:
+        def __init__(self, tab_payloads=None):
+            self.tab_payloads = deque(tab_payloads or [])
+            self.get_calls = []
+            self.put_calls = []
+
+        def get(self, url, timeout=None):
+            self.get_calls.append((url, timeout))
+            if not self.tab_payloads:
+                raise AssertionError(f"unexpected GET {url}")
+            return BrowserSessionTests._FakeHttpResponse(self.tab_payloads.popleft())
+
+        def put(self, url, timeout=None):
+            self.put_calls.append((url, timeout))
+            return BrowserSessionTests._FakeHttpResponse({})
+
+    class _FakeWebSocket:
+        def __init__(self, responses):
+            self._responses = deque(responses)
+            self.sent_messages = []
+
+        def send(self, message):
+            self.sent_messages.append(json.loads(message))
+
+        def recv(self):
+            if not self._responses:
+                raise AssertionError("unexpected websocket recv")
+            return json.dumps(self._responses.popleft())
+
+        def close(self):
+            return None
+
     def test_browser_client_refreshes_existing_goofish_tab_before_reading_cookies(self):
         from browser_refresh.browser_client import BrowserSessionClient
 
@@ -199,6 +242,78 @@ class BrowserSessionTests(unittest.TestCase):
         client = BrowserSessionClient(attached_browser=attached_browser)
 
         self.assertEqual(client.classify_page_state(), "unknown_error")
+
+    def test_browser_client_connect_refreshes_existing_tab_over_remote_debugger(self):
+        from browser_refresh.browser_client import BrowserSessionClient
+
+        http_client = self._FakeHttpClient(
+            tab_payloads=[
+                [
+                    {
+                        "id": "tab-1",
+                        "type": "page",
+                        "url": "https://www.goofish.com/im",
+                        "webSocketDebuggerUrl": "ws://debug/tab-1",
+                    }
+                ]
+            ]
+        )
+        websocket = self._FakeWebSocket([{"id": 1, "result": {}}])
+
+        client = BrowserSessionClient.connect(
+            "http://127.0.0.1:9222",
+            http_client=http_client,
+            websocket_factory=lambda url: websocket,
+        )
+        client.prepare_target_page()
+
+        self.assertEqual(http_client.get_calls, [("http://127.0.0.1:9222/json/list", 10)])
+        self.assertEqual(websocket.sent_messages[0]["method"], "Page.reload")
+
+    def test_browser_client_connect_reads_page_state_and_cookies_over_remote_debugger(self):
+        from browser_refresh.browser_client import BrowserSessionClient
+
+        http_client = self._FakeHttpClient(
+            tab_payloads=[
+                [
+                    {
+                        "id": "tab-1",
+                        "type": "page",
+                        "url": "https://www.goofish.com/im",
+                        "webSocketDebuggerUrl": "ws://debug/tab-1",
+                    }
+                ]
+            ]
+        )
+        websocket = self._FakeWebSocket(
+            [
+                {
+                    "id": 1,
+                    "result": {
+                        "result": {
+                            "value": {
+                                "url": "https://www.goofish.com/im",
+                                "title": "Goofish",
+                                "html": "<html>ok</html>",
+                            }
+                        }
+                    },
+                },
+                {"id": 2, "result": {"cookies": [{"name": "unb", "value": "u1", "domain": ".goofish.com"}]}},
+            ]
+        )
+
+        client = BrowserSessionClient.connect(
+            "http://127.0.0.1:9222",
+            http_client=http_client,
+            websocket_factory=lambda url: websocket,
+        )
+
+        self.assertEqual(client.classify_page_state(), "ready")
+        self.assertEqual(
+            client.get_cookies(),
+            [{"name": "unb", "value": "u1", "domain": ".goofish.com"}],
+        )
 
 
 class BrowserSubmitterTests(unittest.TestCase):
@@ -286,6 +401,51 @@ class BrowserAgentTests(unittest.TestCase):
         agent.run_once()
 
         submitter.submit.assert_called_once()
+
+    def test_browser_agent_does_not_reprepare_same_episode_while_human_verification_is_pending(self):
+        from browser_refresh.agent import BrowserRefreshAgent
+
+        status_reader = mock.Mock(
+            side_effect=[
+                RuntimeState("waiting_for_cookie", "episode-1", True),
+                RuntimeState("validation_failed", "episode-1", True),
+            ]
+        )
+        browser_client = mock.Mock()
+        browser_client.classify_page_state.side_effect = [
+            "needs_human_verification",
+            "needs_human_verification",
+        ]
+        submitter = mock.Mock()
+
+        agent = BrowserRefreshAgent(status_reader=status_reader, browser_client=browser_client, submitter=submitter)
+        agent.run_once()
+        agent.run_once()
+
+        browser_client.prepare_target_page.assert_called_once()
+        self.assertEqual(browser_client.classify_page_state.call_count, 2)
+        submitter.submit.assert_not_called()
+
+    def test_browser_agent_does_not_reprepare_same_episode_while_login_is_pending(self):
+        from browser_refresh.agent import BrowserRefreshAgent
+
+        status_reader = mock.Mock(
+            side_effect=[
+                RuntimeState("waiting_for_cookie", "episode-1", True),
+                RuntimeState("validation_failed", "episode-1", True),
+            ]
+        )
+        browser_client = mock.Mock()
+        browser_client.classify_page_state.side_effect = ["needs_login", "needs_login"]
+        submitter = mock.Mock()
+
+        agent = BrowserRefreshAgent(status_reader=status_reader, browser_client=browser_client, submitter=submitter)
+        agent.run_once()
+        agent.run_once()
+
+        browser_client.prepare_target_page.assert_called_once()
+        self.assertEqual(browser_client.classify_page_state.call_count, 2)
+        submitter.submit.assert_not_called()
 
 
 if __name__ == "__main__":
