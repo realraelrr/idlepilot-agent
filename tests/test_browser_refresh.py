@@ -61,6 +61,17 @@ class RuntimeCookieBundleTests(unittest.TestCase):
 
 
 class RuntimeStateTests(unittest.TestCase):
+    def test_read_runtime_state_returns_empty_inactive_state_when_file_is_missing(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            status_path = os.path.join(tempdir, "missing_runtime_status.json")
+
+            state = read_runtime_state(status_path)
+
+        self.assertIsInstance(state, RuntimeState)
+        self.assertEqual(state.state, "")
+        self.assertEqual(state.episode_id, "")
+        self.assertFalse(state.is_recovery_active)
+
     def test_read_runtime_state_treats_validation_failed_with_episode_id_as_recovery_active(self):
         with tempfile.TemporaryDirectory() as tempdir:
             data_dir = os.path.join(tempdir, "data")
@@ -113,7 +124,9 @@ class RuntimeStateTests(unittest.TestCase):
             second = read_runtime_state(status_path)
 
         self.assertEqual(first.state, "waiting_for_cookie")
+        self.assertTrue(first.is_recovery_active)
         self.assertEqual(second.state, "recovered")
+        self.assertFalse(second.is_recovery_active)
 
 
 if __name__ == "__main__":
