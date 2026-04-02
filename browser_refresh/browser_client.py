@@ -59,14 +59,38 @@ class _CdpAttachedBrowser:
             raise_for_status()
         return response.json()
 
+    def _list_tabs(self) -> list[dict[str, Any]]:
+        payload = self._get_json("/json/list") or []
+        return list(payload) if isinstance(payload, list) else []
+
     @staticmethod
     def _is_goofish_tab(tab: dict[str, Any]) -> bool:
         if str(tab.get("type") or "").strip() != "page":
             return False
         return "goofish.com" in str(tab.get("url") or "").lower()
 
+    def _refresh_current_tab_reference(self) -> dict[str, Any] | None:
+        if self._current_tab is None:
+            return None
+
+        current_tab_id = str(self._current_tab.get("id") or "").strip()
+        live_goofish_tab: dict[str, Any] | None = None
+        for tab in self._list_tabs():
+            if not self._is_goofish_tab(tab):
+                continue
+            if live_goofish_tab is None:
+                live_goofish_tab = tab
+            if str(tab.get("id") or "").strip() == current_tab_id:
+                self._current_tab = tab
+                return tab
+
+        self._current_tab = live_goofish_tab
+        return live_goofish_tab
+
     def _ensure_tab(self, tab: dict[str, Any] | None = None) -> dict[str, Any]:
-        resolved = tab or self._current_tab or self.find_target_tab()
+        resolved = tab
+        if resolved is None:
+            resolved = self._refresh_current_tab_reference() or self.find_target_tab()
         if resolved is None:
             raise RuntimeError("no attached goofish page is available in the remote debugger session")
         return resolved
@@ -108,7 +132,7 @@ class _CdpAttachedBrowser:
                 close()
 
     def find_target_tab(self) -> dict[str, Any] | None:
-        for tab in self._get_json("/json/list") or []:
+        for tab in self._list_tabs():
             if self._is_goofish_tab(tab):
                 self._current_tab = tab
                 return tab

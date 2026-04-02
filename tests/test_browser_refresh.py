@@ -193,6 +193,18 @@ class BrowserSessionTests(unittest.TestCase):
         def close(self):
             return None
 
+    class _RaisingWebSocket:
+        def __init__(self, exc):
+            self.exc = exc
+            self.sent_messages = []
+
+        def send(self, message):
+            self.sent_messages.append(json.loads(message))
+            raise self.exc
+
+        def close(self):
+            return None
+
     def test_browser_client_refreshes_existing_goofish_tab_before_reading_cookies(self):
         from browser_refresh.browser_client import BrowserSessionClient
 
@@ -274,7 +286,15 @@ class BrowserSessionTests(unittest.TestCase):
                         "url": "https://www.goofish.com/im",
                         "webSocketDebuggerUrl": "ws://debug/tab-1",
                     }
-                ]
+                ],
+                [
+                    {
+                        "id": "tab-1",
+                        "type": "page",
+                        "url": "https://www.goofish.com/im",
+                        "webSocketDebuggerUrl": "ws://debug/tab-1",
+                    }
+                ],
             ]
         )
         websocket = self._FakeWebSocket([{"id": 1, "result": {}}])
@@ -301,7 +321,15 @@ class BrowserSessionTests(unittest.TestCase):
                         "url": "https://www.goofish.com/im",
                         "webSocketDebuggerUrl": "ws://debug/tab-1",
                     }
-                ]
+                ],
+                [
+                    {
+                        "id": "tab-1",
+                        "type": "page",
+                        "url": "https://www.goofish.com/im",
+                        "webSocketDebuggerUrl": "ws://debug/tab-1",
+                    }
+                ],
             ]
         )
         websocket = self._FakeWebSocket(
@@ -359,6 +387,81 @@ class BrowserSessionTests(unittest.TestCase):
 
         with self.assertRaisesRegex(RuntimeError, "timed out waiting for CDP response"):
             client.prepare_target_page()
+
+    def test_browser_client_recovers_when_cached_tab_goes_stale_and_live_goofish_tab_exists(self):
+        from browser_refresh.browser_client import BrowserSessionClient
+
+        stale_tab = {
+            "id": "tab-stale",
+            "type": "page",
+            "url": "https://www.goofish.com/im",
+            "webSocketDebuggerUrl": "ws://debug/tab-stale",
+        }
+        live_tab = {
+            "id": "tab-live",
+            "type": "page",
+            "url": "https://www.goofish.com/im",
+            "webSocketDebuggerUrl": "ws://debug/tab-live",
+        }
+        http_client = self._FakeHttpClient(
+            tab_payloads=[
+                [stale_tab],
+                [live_tab],
+            ]
+        )
+        stale_websockets = deque(
+            [
+                self._FakeWebSocket(
+                    [
+                        {
+                            "id": 1,
+                            "result": {
+                                "result": {
+                                    "value": {
+                                        "url": "https://www.goofish.com/im",
+                                        "title": "Goofish",
+                                        "html": "<html>ok</html>",
+                                    }
+                                }
+                            },
+                        }
+                    ]
+                ),
+                self._RaisingWebSocket(RuntimeError("stale tab should have been rediscovered")),
+            ]
+        )
+        live_websocket = self._FakeWebSocket(
+            [
+                {
+                    "id": 2,
+                    "result": {
+                        "result": {
+                            "value": {
+                                "url": "https://www.goofish.com/im",
+                                "title": "Goofish Live",
+                                "html": "<html>live</html>",
+                            }
+                        }
+                    },
+                }
+            ]
+        )
+        def websocket_factory(url):
+            if url == "ws://debug/tab-stale":
+                return stale_websockets.popleft()
+            if url == "ws://debug/tab-live":
+                return live_websocket
+            raise AssertionError(f"unexpected websocket url {url}")
+
+        client = BrowserSessionClient.connect(
+            "http://127.0.0.1:9222",
+            http_client=http_client,
+            websocket_factory=websocket_factory,
+        )
+
+        self.assertEqual(client.classify_page_state(), "ready")
+        self.assertEqual(client.classify_page_state(), "ready")
+        self.assertEqual(http_client.get_calls, [("http://127.0.0.1:9222/json/list", 10), ("http://127.0.0.1:9222/json/list", 10)])
 
 
 class BrowserSubmitterTests(unittest.TestCase):
