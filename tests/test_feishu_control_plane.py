@@ -330,6 +330,39 @@ class ControlPlaneTests(unittest.TestCase):
 
         self.assertEqual(submission_state["sender_open_id"], "")
 
+    def test_browser_cookie_submit_rejects_missing_or_invalid_shared_secret(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            plane, _ = self.create_plane(tempdir, BROWSER_REFRESH_SHARED_SECRET="browser-secret")
+
+            status_code, payload = plane.handle_browser_cookie_submit_request(
+                headers={"Authorization": "Bearer wrong-secret"},
+                raw_body=b'{"cookie":"unb=1; cookie2=2; cna=3; _m_h5_tk=4","episode_id":"episode-1"}',
+            )
+
+        self.assertEqual(status_code, 403)
+        self.assertEqual(payload["error"], "untrusted browser refresh request")
+
+    def test_browser_cookie_submit_accepts_valid_request_without_feishu_reply(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            plane, feishu_client = self.create_plane(
+                tempdir,
+                BROWSER_REFRESH_SHARED_SECRET="browser-secret",
+            )
+            plane.start_followup_task = mock.Mock()
+
+            status_code, payload = plane.handle_browser_cookie_submit_request(
+                headers={"Authorization": "Bearer browser-secret"},
+                raw_body=b'{"cookie":"unb=1; cookie2=2; cna=3; _m_h5_tk=4","episode_id":"episode-1"}',
+            )
+
+            with open(plane.submission_state_path, "r", encoding="utf-8") as f:
+                submission_state = json.load(f)
+
+        self.assertEqual(status_code, 202)
+        self.assertEqual(payload["ok"], True)
+        self.assertEqual(submission_state["source"], "browser_refresh")
+        feishu_client.send_text_message.assert_not_called()
+
     def test_non_text_private_message_is_rejected(self):
         with tempfile.TemporaryDirectory() as tempdir:
             plane, feishu_client = self.create_plane(tempdir)
@@ -553,11 +586,11 @@ class AckLoopTests(unittest.TestCase):
 
 
 class ProactiveAlertTests(unittest.TestCase):
-    def create_plane(self, tempdir):
+    def create_plane(self, tempdir, **env_overrides):
         from services.feishu_control_plane import FeishuControlPlane, load_feishu_config
 
         feishu_client = mock.Mock()
-        with mock.patch.dict(os.environ, build_test_env(), clear=True):
+        with mock.patch.dict(os.environ, build_test_env(**env_overrides), clear=True):
             with mock.patch("os.getcwd", return_value=tempdir):
                 plane = FeishuControlPlane(
                     load_feishu_config(),
@@ -624,7 +657,45 @@ class ProactiveAlertTests(unittest.TestCase):
         self.assertEqual(second_client.send_text_message.call_count, 0)
         self.assertEqual(persisted_state["last_alerted_waiting_episode_id"], "episode-1")
 
-    def test_terminal_state_allows_next_invalid_cookie_episode_to_alert_again(self):
+    def test_waiting_alert_mentions_remote_browser_url_and_keeps_same_episode_open_after_validation_failed(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            plane, feishu_client, alert_state_path = self.create_plane(
+                tempdir,
+                BROWSER_REFRESH_URL="https://browser.example.ts.net",
+            )
+            self.write_runtime_status(
+                plane.runtime_status_path,
+                {
+                    "state": "waiting_for_cookie",
+                    "updated_at": "2026-04-03T12:00:00+08:00",
+                    "message": "Cookie invalid, waiting for refresh",
+                    "cookie_invalid_episode_id": "episode-1",
+                },
+            )
+            plane.poll_runtime_status_once()
+
+            self.write_runtime_status(
+                plane.runtime_status_path,
+                {
+                    "state": "validation_failed",
+                    "updated_at": "2026-04-03T12:00:05+08:00",
+                    "message": "Cookie validation failed",
+                    "cookie_invalid_episode_id": "episode-1",
+                },
+            )
+            plane.poll_runtime_status_once()
+
+            with open(alert_state_path, "r", encoding="utf-8") as f:
+                persisted_state = json.load(f)
+
+        sent_text = feishu_client.send_text_message.call_args.args[1]
+        self.assertIn("远程浏览器", sent_text)
+        self.assertIn("https://browser.example.ts.net", sent_text)
+        self.assertEqual(persisted_state["last_alerted_waiting_episode_id"], "episode-1")
+        self.assertEqual(persisted_state["awaiting_terminal_episode_id"], "episode-1")
+        self.assertEqual(feishu_client.send_text_message.call_count, 2)
+
+    def test_recovered_state_allows_next_invalid_cookie_episode_to_alert_again(self):
         with tempfile.TemporaryDirectory() as tempdir:
             plane, feishu_client, alert_state_path = self.create_plane(tempdir)
             self.write_runtime_status(
@@ -641,9 +712,9 @@ class ProactiveAlertTests(unittest.TestCase):
             self.write_runtime_status(
                 plane.runtime_status_path,
                 {
-                    "state": "validation_failed",
+                    "state": "recovered",
                     "updated_at": "2026-03-22T09:01:00+08:00",
-                    "message": "Cookie validation failed",
+                    "message": "Cookie recovered",
                     "cookie_invalid_episode_id": "episode-1",
                 },
             )
@@ -679,7 +750,7 @@ class ProactiveAlertTests(unittest.TestCase):
                     alerted_episodes[episode_id] = True
         self.assertEqual(alerted_episodes, {"episode-1": True, "episode-2": True})
 
-    def test_new_waiting_episode_does_not_alert_before_current_episode_reaches_terminal_state(self):
+    def test_new_waiting_episode_replaces_existing_waiting_alert_state(self):
         with tempfile.TemporaryDirectory() as tempdir:
             plane, feishu_client, alert_state_path = self.create_plane(tempdir)
             self.write_runtime_status(
@@ -707,11 +778,15 @@ class ProactiveAlertTests(unittest.TestCase):
             with open(alert_state_path, "r", encoding="utf-8") as f:
                 persisted_state = json.load(f)
 
-        self.assertEqual(feishu_client.send_text_message.call_count, 2)
+        self.assertEqual(feishu_client.send_text_message.call_count, 4)
+        episode_counts = {"episode-1": 0, "episode-2": 0}
         for call in feishu_client.send_text_message.call_args_list:
-            self.assertIn("episode-1", call.args[1])
-            self.assertNotIn("episode-2", call.args[1])
-        self.assertEqual(persisted_state["last_alerted_waiting_episode_id"], "episode-1")
+            for episode_id in episode_counts:
+                if episode_id in call.args[1]:
+                    episode_counts[episode_id] += 1
+        self.assertEqual(episode_counts, {"episode-1": 2, "episode-2": 2})
+        self.assertEqual(persisted_state["last_alerted_waiting_episode_id"], "episode-2")
+        self.assertEqual(persisted_state["awaiting_terminal_episode_id"], "episode-2")
 
     def test_waiting_state_without_cookie_invalid_episode_id_does_not_send_proactive_alert(self):
         with tempfile.TemporaryDirectory() as tempdir:

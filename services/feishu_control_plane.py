@@ -16,6 +16,7 @@ from utils.feishu_client import FeishuClient
 DEFAULT_CALLBACK_HOST = "127.0.0.1"
 DEFAULT_CALLBACK_PORT = 8100
 DEFAULT_CALLBACK_PATH = "/feishu/events"
+DEFAULT_BROWSER_COOKIE_SUBMIT_PATH = "/internal/browser-cookie-submit"
 DEFAULT_CALLBACK_MODE = "token"
 DEFAULT_STALE_LOCK_SECONDS = 300
 DEFAULT_COOKIE_FILE_PATH = os.path.join("data", "cookies.txt")
@@ -161,6 +162,9 @@ class FeishuControlPlane:
         )
         self.runtime_status_path = _resolve_path(runtime_status_path or DEFAULT_RUNTIME_STATUS_PATH)
         self.alert_state_path = _resolve_path(alert_state_path or DEFAULT_ALERT_STATE_PATH)
+        self.browser_refresh_shared_secret = _read_optional_env("BROWSER_REFRESH_SHARED_SECRET")
+        self.browser_refresh_url = _read_optional_env("BROWSER_REFRESH_URL")
+        self.browser_cookie_submit_path = DEFAULT_BROWSER_COOKIE_SUBMIT_PATH
         self.event_handler = event_handler or self._handle_event
         self._now_provider = now_provider or _now_dt
         self._uuid_factory = uuid_factory or (lambda: uuid.uuid4().hex[:6])
@@ -384,14 +388,19 @@ class FeishuControlPlane:
     def _extract_waiting_episode_id(runtime_status: dict) -> str:
         return str(runtime_status.get("cookie_invalid_episode_id") or "").strip()
 
-    @staticmethod
-    def _format_waiting_alert(runtime_status: dict, episode_id: str) -> str:
+    def _format_waiting_alert(self, runtime_status: dict, episode_id: str) -> str:
         message = str(runtime_status.get("message") or "Cookie invalid, waiting for refresh").strip()
+        browser_guidance = (
+            f"\n请打开远程浏览器处理验证: {self.browser_refresh_url}"
+            if self.browser_refresh_url
+            else "\n请打开远程浏览器处理验证。"
+        )
         return (
             "检测到 App Bot 正在等待新的 Cookie。\n"
             f"当前状态: {runtime_status.get('state', 'waiting_for_cookie')}\n"
             f"失效事件: {episode_id}\n"
             f"说明: {message}"
+            f"{browser_guidance}"
         )
 
     def _persist_waiting_episode_delivery_state(self, episode_id: str, delivered_admin_open_ids: set[str]) -> None:
@@ -428,9 +437,11 @@ class FeishuControlPlane:
             if not episode_id:
                 return
 
+            if awaiting_terminal_episode_id and awaiting_terminal_episode_id != episode_id:
+                self._clear_waiting_episode_alert(awaiting_terminal_episode_id)
+                awaiting_terminal_episode_id = ""
+
             if state == "waiting_for_cookie":
-                if awaiting_terminal_episode_id and awaiting_terminal_episode_id != episode_id:
-                    return
                 if self._alert_state.get("last_alerted_waiting_episode_id") == episode_id:
                     return
                 alert_text = self._format_waiting_alert(runtime_status, episode_id)
@@ -450,7 +461,7 @@ class FeishuControlPlane:
                 self._persist_waiting_episode_delivery_state(episode_id, delivered_admin_open_ids)
                 return
 
-            if state in {"recovered", "validation_failed"}:
+            if state == "recovered":
                 self._clear_waiting_episode_alert(episode_id)
 
     def watch_runtime_status_forever(self) -> None:
@@ -528,6 +539,36 @@ class FeishuControlPlane:
         self.start_followup_task(submission_id)
         return submission_id
 
+    def handle_browser_cookie_submit_request(self, headers: dict, raw_body: bytes):
+        auth_header = str(headers.get("Authorization") or "").strip()
+        expected_secret = self.browser_refresh_shared_secret
+        if not expected_secret or auth_header != f"Bearer {expected_secret}":
+            return 403, {"error": "untrusted browser refresh request"}
+
+        try:
+            payload = json.loads(raw_body.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            return 400, {"error": "invalid browser refresh payload"}
+
+        cookie_text = str(payload.get("cookie") or "").strip()
+        episode_id = str(payload.get("episode_id") or "").strip()
+        if not cookie_text or not episode_id:
+            return 400, {"error": "missing browser refresh fields"}
+
+        try:
+            submission_id = self.submit_cookie_update(
+                source="browser_refresh",
+                cookie_text=cookie_text,
+                sender_open_id="",
+                send_replies=False,
+            )
+        except SubmissionBusyError:
+            return 409, {"error": "cookie submission already in progress"}
+        except OSError:
+            return 500, {"error": "cookie write failed"}
+
+        return 202, {"ok": True, "submission_id": submission_id, "episode_id": episode_id}
+
     def _submit_cookie(self, sender_open_id: str, cookie_text: str) -> None:
         try:
             self.submit_cookie_update(
@@ -596,16 +637,23 @@ class FeishuControlPlane:
 def build_request_handler(control_plane: FeishuControlPlane):
     class FeishuCallbackHandler(BaseHTTPRequestHandler):
         def do_POST(self):
-            if self.path != control_plane.config.callback_path:
+            if self.path == control_plane.browser_cookie_submit_path:
+                content_length = int(self.headers.get("Content-Length", "0"))
+                raw_body = self.rfile.read(content_length)
+                status_code, payload = control_plane.handle_browser_cookie_submit_request(
+                    headers=self.headers,
+                    raw_body=raw_body,
+                )
+            elif self.path == control_plane.config.callback_path:
+                content_length = int(self.headers.get("Content-Length", "0"))
+                raw_body = self.rfile.read(content_length)
+                status_code, payload = control_plane.handle_callback_request(raw_body)
+            else:
                 self.send_response(404)
                 self.send_header("Content-Type", "application/json; charset=utf-8")
                 self.end_headers()
                 self.wfile.write(b'{"error":"not found"}')
                 return
-
-            content_length = int(self.headers.get("Content-Length", "0"))
-            raw_body = self.rfile.read(content_length)
-            status_code, payload = control_plane.handle_callback_request(raw_body)
 
             response_body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
             self.send_response(status_code)
