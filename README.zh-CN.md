@@ -6,6 +6,8 @@
 
 IdlePilot 用 LLM 意图路由、会话记忆、专门的回复 agent 和飞书运维控制面，让交易会话在账号 Cookie 失效等运行时问题发生后也能恢复。
 
+这是基于 [shaxiu/XianyuAutoAgent](https://github.com/shaxiu/XianyuAutoAgent) 继续开发的版本。
+
 ## 契约
 
 - 将买家消息路由到 `price`、`tech` 或 `default` 专家流程。

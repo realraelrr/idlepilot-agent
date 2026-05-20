@@ -9,6 +9,9 @@ IdlePilot keeps marketplace conversations moving with LLM-backed intent routing,
 conversation memory, specialized reply agents, and a Feishu operator control
 plane for cookie recovery.
 
+This is a continued-development version based on
+[shaxiu/XianyuAutoAgent](https://github.com/shaxiu/XianyuAutoAgent).
+
 ## Contract
 
 - Route buyer messages through `price`, `tech`, or `default` expert flows.
