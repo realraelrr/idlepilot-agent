@@ -1,3 +1,15 @@
+# IdlePilot Agent
+
+AI operations agent for second-hand marketplace workflows, based on the Xianyu
+AutoAgent runtime. It keeps a seller account responsive, routes buyer messages
+to specialized LLM agents, negotiates within configured rules, preserves
+conversation context, and exposes a Feishu operator control plane for runtime
+recovery.
+
+This repository is maintained as the `idlepilot-agent` publishing source. The
+Chinese setup guide below still uses the original Xianyu AutoAgent framing where
+that wording matches the marketplace integration.
+
 # 🚀 Xianyu AutoAgent - 智能闲鱼客服机器人系统
 
 [![Python Version](https://img.shields.io/badge/python-3.8%2B-blue)](https://www.python.org/) [![LLM Powered](https://img.shields.io/badge/LLM-powered-FF6F61)](https://platform.openai.com/)
