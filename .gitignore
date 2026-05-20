@@ -1,8 +1,10 @@
-# 环境变量文件（包含敏感信息）
+# Environment files and local secrets
 .env
-# 提示词文件
+
+# Local prompt files
 *_prompt.txt
-# Python缓存文件
+
+# Python cache files
 __pycache__/
 *.py[cod]
 *$py.class
@@ -24,7 +26,7 @@ var/
 .installed.cfg
 *.egg
 
-# 虚拟环境
+# Virtual environments
 venv/
 ENV/
 env/
@@ -32,11 +34,11 @@ env/
 conda-env/
 .conda-pkgs/
 
-# 日志文件
+# Logs
 logs/
 *.log
 
-# 数据库文件
+# Runtime data
 *.db
 *.sqlite3
 *.sqlite
@@ -45,7 +47,7 @@ data/cookie_submission_state.json
 data/runtime_status.json
 data/alert_state.json
 
-# 其他临时文件
+# Temporary files and local tooling state
 .DS_Store
 .idea/
 .vscode/
@@ -59,3 +61,5 @@ htmlcov/
 .hypothesis/
 .coverage.* 
 .worktrees/
+.state/
+docs/superpowers/

@@ -294,170 +294,22 @@ class ControlPlaneTests(unittest.TestCase):
         self.assertEqual(feishu_client.send_text_message.call_args.args[1], "已接收，开始校验")
         plane.start_followup_task.assert_called_once()
 
-    def test_browser_submission_core_writes_source_without_sender_open_id(self):
+    def test_submit_cookie_update_persists_manual_submission_source_and_sender(self):
         with tempfile.TemporaryDirectory() as tempdir:
-            plane, _ = self.create_plane(tempdir, BROWSER_REFRESH_SHARED_SECRET="browser-secret")
+            plane, _ = self.create_plane(tempdir)
             plane.start_followup_task = mock.Mock()
 
             submission_id = plane.submit_cookie_update(
-                source="browser_refresh",
                 cookie_text="unb=1; cookie2=2; cna=3; _m_h5_tk=4",
-                sender_open_id="",
-                send_replies=False,
+                sender_open_id="ou_admin_1",
             )
 
             with open(plane.submission_state_path, "r", encoding="utf-8") as f:
                 submission_state = json.load(f)
 
         self.assertEqual(submission_state["submission_id"], submission_id)
-        self.assertEqual(submission_state["source"], "browser_refresh")
-        self.assertEqual(submission_state["sender_open_id"], "")
-
-    def test_submission_core_clears_persisted_reply_target_when_send_replies_disabled(self):
-        with tempfile.TemporaryDirectory() as tempdir:
-            plane, _ = self.create_plane(tempdir, BROWSER_REFRESH_SHARED_SECRET="browser-secret")
-            plane.start_followup_task = mock.Mock()
-
-            plane.submit_cookie_update(
-                source="browser_refresh",
-                cookie_text="unb=1; cookie2=2; cna=3; _m_h5_tk=4",
-                sender_open_id="ou_admin_1",
-                send_replies=False,
-            )
-
-            with open(plane.submission_state_path, "r", encoding="utf-8") as f:
-                submission_state = json.load(f)
-
-        self.assertEqual(submission_state["sender_open_id"], "")
-
-    def test_browser_cookie_submit_rejects_missing_or_invalid_shared_secret(self):
-        with tempfile.TemporaryDirectory() as tempdir:
-            plane, _ = self.create_plane(tempdir, BROWSER_REFRESH_SHARED_SECRET="browser-secret")
-
-            status_code, payload = plane.handle_browser_cookie_submit_request(
-                headers={"Authorization": "Bearer wrong-secret"},
-                raw_body=b'{"cookie":"unb=1; cookie2=2; cna=3; _m_h5_tk=4","episode_id":"episode-1"}',
-            )
-
-        self.assertEqual(status_code, 403)
-        self.assertEqual(payload["error"], "untrusted browser refresh request")
-
-    def test_browser_cookie_submit_accepts_valid_request_without_feishu_reply(self):
-        with tempfile.TemporaryDirectory() as tempdir:
-            plane, feishu_client = self.create_plane(
-                tempdir,
-                BROWSER_REFRESH_SHARED_SECRET="browser-secret",
-            )
-            plane.start_followup_task = mock.Mock()
-            os.makedirs(os.path.dirname(plane.runtime_status_path), exist_ok=True)
-            with open(plane.runtime_status_path, "w", encoding="utf-8") as f:
-                json.dump(
-                    {
-                        "state": "waiting_for_cookie",
-                        "cookie_invalid_episode_id": "episode-1",
-                        "updated_at": "2026-04-03T12:00:00+08:00",
-                    },
-                    f,
-                    ensure_ascii=False,
-                )
-
-            status_code, payload = plane.handle_browser_cookie_submit_request(
-                headers={"Authorization": "Bearer browser-secret"},
-                raw_body=b'{"cookie":"unb=1; cookie2=2; cna=3; _m_h5_tk=4","episode_id":"episode-1"}',
-            )
-
-            with open(plane.submission_state_path, "r", encoding="utf-8") as f:
-                submission_state = json.load(f)
-
-        self.assertEqual(status_code, 202)
-        self.assertEqual(payload["ok"], True)
-        self.assertEqual(submission_state["source"], "browser_refresh")
-        feishu_client.send_text_message.assert_not_called()
-
-    def test_browser_cookie_submit_rejects_stale_or_mismatched_episode(self):
-        with tempfile.TemporaryDirectory() as tempdir:
-            plane, _ = self.create_plane(
-                tempdir,
-                BROWSER_REFRESH_SHARED_SECRET="browser-secret",
-            )
-            plane.start_followup_task = mock.Mock()
-            os.makedirs(os.path.dirname(plane.runtime_status_path), exist_ok=True)
-            with open(plane.runtime_status_path, "w", encoding="utf-8") as f:
-                json.dump(
-                    {
-                        "state": "waiting_for_cookie",
-                        "cookie_invalid_episode_id": "episode-current",
-                        "updated_at": "2026-04-03T12:00:00+08:00",
-                    },
-                    f,
-                    ensure_ascii=False,
-                )
-
-            status_code, payload = plane.handle_browser_cookie_submit_request(
-                headers={"Authorization": "Bearer browser-secret"},
-                raw_body=b'{"cookie":"unb=1; cookie2=2; cna=3; _m_h5_tk=4","episode_id":"episode-stale"}',
-            )
-
-        self.assertEqual(status_code, 409)
-        self.assertEqual(payload["error"], "browser refresh episode is not active")
-        self.assertFalse(os.path.exists(plane.submission_state_path))
-        plane.start_followup_task.assert_not_called()
-
-    def test_browser_cookie_submit_accepts_active_validation_failed_episode(self):
-        with tempfile.TemporaryDirectory() as tempdir:
-            plane, _ = self.create_plane(
-                tempdir,
-                BROWSER_REFRESH_SHARED_SECRET="browser-secret",
-            )
-            plane.start_followup_task = mock.Mock()
-            os.makedirs(os.path.dirname(plane.runtime_status_path), exist_ok=True)
-            with open(plane.runtime_status_path, "w", encoding="utf-8") as f:
-                json.dump(
-                    {
-                        "state": "validation_failed",
-                        "cookie_invalid_episode_id": "episode-1",
-                        "updated_at": "2026-04-03T12:00:05+08:00",
-                    },
-                    f,
-                    ensure_ascii=False,
-                )
-
-            status_code, payload = plane.handle_browser_cookie_submit_request(
-                headers={"Authorization": "Bearer browser-secret"},
-                raw_body=b'{"cookie":"unb=1; cookie2=2; cna=3; _m_h5_tk=4","episode_id":"episode-1"}',
-            )
-
-        self.assertEqual(status_code, 202)
-        self.assertEqual(payload["ok"], True)
-        plane.start_followup_task.assert_called_once()
-
-    def test_browser_cookie_submit_accepts_active_validating_new_cookie_episode(self):
-        with tempfile.TemporaryDirectory() as tempdir:
-            plane, _ = self.create_plane(
-                tempdir,
-                BROWSER_REFRESH_SHARED_SECRET="browser-secret",
-            )
-            plane.start_followup_task = mock.Mock()
-            os.makedirs(os.path.dirname(plane.runtime_status_path), exist_ok=True)
-            with open(plane.runtime_status_path, "w", encoding="utf-8") as f:
-                json.dump(
-                    {
-                        "state": "validating_new_cookie",
-                        "cookie_invalid_episode_id": "episode-1",
-                        "updated_at": "2026-04-03T12:00:03+08:00",
-                    },
-                    f,
-                    ensure_ascii=False,
-                )
-
-            status_code, payload = plane.handle_browser_cookie_submit_request(
-                headers={"Authorization": "Bearer browser-secret"},
-                raw_body=b'{"cookie":"unb=1; cookie2=2; cna=3; _m_h5_tk=4","episode_id":"episode-1"}',
-            )
-
-        self.assertEqual(status_code, 202)
-        self.assertEqual(payload["ok"], True)
-        plane.start_followup_task.assert_called_once()
+        self.assertEqual(submission_state["source"], "feishu_manual")
+        self.assertEqual(submission_state["sender_open_id"], "ou_admin_1")
 
     def test_non_text_private_message_is_rejected(self):
         with tempfile.TemporaryDirectory() as tempdir:
@@ -650,37 +502,6 @@ class AckLoopTests(unittest.TestCase):
         self.assertEqual(submission_state["state"], "completed")
         self.assertEqual(feishu_client.send_text_message.call_args.args[1], "Cookie 已接收，但校验失败，请重新获取")
 
-    def test_browser_submission_completion_does_not_send_private_chat_reply(self):
-        with tempfile.TemporaryDirectory() as tempdir:
-            plane, feishu_client = self.create_plane(tempdir)
-            plane._generate_submission_id = mock.Mock(return_value="sub-1")
-            plane.start_followup_task = (
-                lambda submission_id: plane.follow_submission_result(submission_id)
-            )
-            os.makedirs(os.path.dirname(plane.runtime_status_path), exist_ok=True)
-            with open(plane.runtime_status_path, "w", encoding="utf-8") as f:
-                json.dump(
-                    {
-                        "submission_id": "sub-1",
-                        "state": "recovered",
-                        "cookie_invalid_episode_id": "episode-1",
-                        "updated_at": "2026-04-03T12:00:05+08:00",
-                        "message": "Cookie validated and websocket reconnected",
-                    },
-                    f,
-                    ensure_ascii=False,
-                )
-
-            plane.submit_cookie_update(
-                source="browser_refresh",
-                cookie_text="unb=1; cookie2=2; cna=3; _m_h5_tk=4",
-                sender_open_id="",
-                send_replies=False,
-            )
-
-        feishu_client.send_text_message.assert_not_called()
-
-
 class ProactiveAlertTests(unittest.TestCase):
     def create_plane(self, tempdir, **env_overrides):
         from services.feishu_control_plane import FeishuControlPlane, load_feishu_config
@@ -753,12 +574,9 @@ class ProactiveAlertTests(unittest.TestCase):
         self.assertEqual(second_client.send_text_message.call_count, 0)
         self.assertEqual(persisted_state["last_alerted_waiting_episode_id"], "episode-1")
 
-    def test_waiting_alert_mentions_remote_browser_url_and_keeps_same_episode_open_after_validation_failed(self):
+    def test_waiting_alert_mentions_manual_cookie_submission_and_keeps_same_episode_open_after_validation_failed(self):
         with tempfile.TemporaryDirectory() as tempdir:
-            plane, feishu_client, alert_state_path = self.create_plane(
-                tempdir,
-                BROWSER_REFRESH_URL="https://browser.example.ts.net",
-            )
+            plane, feishu_client, alert_state_path = self.create_plane(tempdir)
             self.write_runtime_status(
                 plane.runtime_status_path,
                 {
@@ -785,11 +603,50 @@ class ProactiveAlertTests(unittest.TestCase):
                 persisted_state = json.load(f)
 
         sent_text = feishu_client.send_text_message.call_args.args[1]
-        self.assertIn("远程浏览器", sent_text)
-        self.assertIn("https://browser.example.ts.net", sent_text)
+        self.assertIn("飞书 Bot", sent_text)
+        self.assertIn("data/cookies.txt", sent_text)
+        self.assertNotIn("远程浏览器", sent_text)
         self.assertEqual(persisted_state["last_alerted_waiting_episode_id"], "episode-1")
         self.assertEqual(persisted_state["awaiting_terminal_episode_id"], "episode-1")
         self.assertEqual(feishu_client.send_text_message.call_count, 2)
+
+    def test_waiting_alert_uses_repo_relative_cookie_file_label_for_container_absolute_path(self):
+        from services.feishu_control_plane import FeishuControlPlane, load_feishu_config
+
+        with tempfile.TemporaryDirectory() as tempdir:
+            feishu_client = mock.Mock()
+            runtime_status_path = os.path.join(tempdir, "data", "runtime_status.json")
+            alert_state_path = os.path.join(tempdir, "data", "alert_state.json")
+            os.makedirs(os.path.dirname(runtime_status_path), exist_ok=True)
+
+            with mock.patch("os.getcwd", return_value="/app"):
+                with mock.patch.dict(
+                    os.environ,
+                    build_test_env(COOKIE_FILE_PATH="/app/data/cookies.txt"),
+                    clear=True,
+                ):
+                    plane = FeishuControlPlane(
+                        load_feishu_config(),
+                        feishu_client=feishu_client,
+                        cookie_file_path="/app/data/cookies.txt",
+                        runtime_status_path=runtime_status_path,
+                        alert_state_path=alert_state_path,
+                    )
+
+            self.write_runtime_status(
+                plane.runtime_status_path,
+                {
+                    "state": "waiting_for_cookie",
+                    "updated_at": "2026-04-19T16:00:00+08:00",
+                    "message": "Cookie invalid, waiting for refresh",
+                    "cookie_invalid_episode_id": "episode-1",
+                },
+            )
+            plane.poll_runtime_status_once()
+
+        sent_text = feishu_client.send_text_message.call_args.args[1]
+        self.assertIn("data/cookies.txt", sent_text)
+        self.assertNotIn("/app/data/cookies.txt", sent_text)
 
     def test_recovered_state_allows_next_invalid_cookie_episode_to_alert_again(self):
         with tempfile.TemporaryDirectory() as tempdir:

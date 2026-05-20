@@ -16,7 +16,6 @@ from utils.feishu_client import FeishuClient
 DEFAULT_CALLBACK_HOST = "127.0.0.1"
 DEFAULT_CALLBACK_PORT = 8100
 DEFAULT_CALLBACK_PATH = "/feishu/events"
-DEFAULT_BROWSER_COOKIE_SUBMIT_PATH = "/internal/browser-cookie-submit"
 DEFAULT_CALLBACK_MODE = "token"
 DEFAULT_STALE_LOCK_SECONDS = 300
 DEFAULT_COOKIE_FILE_PATH = os.path.join("data", "cookies.txt")
@@ -26,7 +25,6 @@ DEFAULT_ALERT_STATE_PATH = os.path.join("data", "alert_state.json")
 DEFAULT_FOLLOWUP_TIMEOUT_SECONDS = 60
 DEFAULT_FOLLOWUP_POLL_INTERVAL_SECONDS = 1
 DEFAULT_RUNTIME_STATUS_POLL_INTERVAL_SECONDS = 1
-ACTIVE_BROWSER_RECOVERY_STATES = {"waiting_for_cookie", "validating_new_cookie", "validation_failed"}
 
 
 class SubmissionBusyError(Exception):
@@ -62,6 +60,21 @@ def _resolve_path(path: str) -> str:
     if os.path.isabs(path):
         return path
     return os.path.join(os.getcwd(), path)
+
+
+def _display_path(path: str, resolved_path: str) -> str:
+    raw_path = str(path or "").strip()
+    if raw_path and not os.path.isabs(raw_path):
+        return raw_path
+
+    try:
+        relative_path = os.path.relpath(resolved_path, os.getcwd())
+    except ValueError:
+        return raw_path or resolved_path
+
+    if not relative_path.startswith(".."):
+        return relative_path
+    return raw_path or resolved_path
 
 
 def _ensure_parent_dir(path: str) -> None:
@@ -155,17 +168,14 @@ class FeishuControlPlane:
     ):
         self.config = config
         self.feishu_client = feishu_client or FeishuClient(config.app_id, config.app_secret)
-        self.cookie_file_path = _resolve_path(
-            cookie_file_path or os.getenv("COOKIE_FILE_PATH", DEFAULT_COOKIE_FILE_PATH)
-        )
+        configured_cookie_file_path = cookie_file_path or os.getenv("COOKIE_FILE_PATH", DEFAULT_COOKIE_FILE_PATH)
+        self.cookie_file_path = _resolve_path(configured_cookie_file_path)
+        self.cookie_file_label = _display_path(configured_cookie_file_path, self.cookie_file_path)
         self.submission_state_path = _resolve_path(
             submission_state_path or DEFAULT_SUBMISSION_STATE_PATH
         )
         self.runtime_status_path = _resolve_path(runtime_status_path or DEFAULT_RUNTIME_STATUS_PATH)
         self.alert_state_path = _resolve_path(alert_state_path or DEFAULT_ALERT_STATE_PATH)
-        self.browser_refresh_shared_secret = _read_optional_env("BROWSER_REFRESH_SHARED_SECRET")
-        self.browser_refresh_url = _read_optional_env("BROWSER_REFRESH_URL")
-        self.browser_cookie_submit_path = DEFAULT_BROWSER_COOKIE_SUBMIT_PATH
         self.event_handler = event_handler or self._handle_event
         self._now_provider = now_provider or _now_dt
         self._uuid_factory = uuid_factory or (lambda: uuid.uuid4().hex[:6])
@@ -336,11 +346,10 @@ class FeishuControlPlane:
         sender_open_id: str,
         state: str,
         message: str = "",
-        source: str = "feishu_manual",
     ) -> dict:
         return {
             "submission_id": submission_id,
-            "source": source,
+            "source": "feishu_manual",
             "sender_open_id": sender_open_id,
             "requested_at": _format_dt(self._now_provider()),
             "state": state,
@@ -389,26 +398,14 @@ class FeishuControlPlane:
     def _extract_waiting_episode_id(runtime_status: dict) -> str:
         return str(runtime_status.get("cookie_invalid_episode_id") or "").strip()
 
-    def _get_active_browser_recovery_episode_id(self) -> str:
-        runtime_status = _read_json_file(self.runtime_status_path)
-        state = str(runtime_status.get("state") or "").strip()
-        if state not in ACTIVE_BROWSER_RECOVERY_STATES:
-            return ""
-        return self._extract_waiting_episode_id(runtime_status)
-
     def _format_waiting_alert(self, runtime_status: dict, episode_id: str) -> str:
         message = str(runtime_status.get("message") or "Cookie invalid, waiting for refresh").strip()
-        browser_guidance = (
-            f"\n请打开远程浏览器处理验证: {self.browser_refresh_url}"
-            if self.browser_refresh_url
-            else "\n请打开远程浏览器处理验证。"
-        )
         return (
             "检测到 App Bot 正在等待新的 Cookie。\n"
             f"当前状态: {runtime_status.get('state', 'waiting_for_cookie')}\n"
             f"失效事件: {episode_id}\n"
-            f"说明: {message}"
-            f"{browser_guidance}"
+            f"说明: {message}\n"
+            f"请直接向飞书 Bot 私聊发送完整 Cookie 文本，或手工更新 {self.cookie_file_label}。"
         )
 
     def _persist_waiting_episode_delivery_state(self, episode_id: str, delivered_admin_open_ids: set[str]) -> None:
@@ -514,12 +511,9 @@ class FeishuControlPlane:
     def submit_cookie_update(
         self,
         *,
-        source: str,
         cookie_text: str,
-        sender_open_id: str = "",
-        send_replies: bool = True,
+        sender_open_id: str,
     ) -> str:
-        persisted_sender_open_id = sender_open_id if send_replies else ""
         with self._mutation_lock:
             self.recover_stale_submission_lock()
             existing_state = self._load_submission_state()
@@ -529,9 +523,8 @@ class FeishuControlPlane:
             submission_id = self._generate_submission_id()
             submission_state = self._build_submission_state(
                 submission_id,
-                persisted_sender_open_id,
+                sender_open_id,
                 "in_progress",
-                source=source,
             )
             self._write_submission_state(submission_state)
 
@@ -547,47 +540,11 @@ class FeishuControlPlane:
         self.start_followup_task(submission_id)
         return submission_id
 
-    def handle_browser_cookie_submit_request(self, headers: dict, raw_body: bytes):
-        auth_header = str(headers.get("Authorization") or "").strip()
-        expected_secret = self.browser_refresh_shared_secret
-        if not expected_secret or auth_header != f"Bearer {expected_secret}":
-            return 403, {"error": "untrusted browser refresh request"}
-
-        try:
-            payload = json.loads(raw_body.decode("utf-8"))
-        except (UnicodeDecodeError, json.JSONDecodeError):
-            return 400, {"error": "invalid browser refresh payload"}
-
-        cookie_text = str(payload.get("cookie") or "").strip()
-        episode_id = str(payload.get("episode_id") or "").strip()
-        if not cookie_text or not episode_id:
-            return 400, {"error": "missing browser refresh fields"}
-
-        active_episode_id = self._get_active_browser_recovery_episode_id()
-        if not active_episode_id or active_episode_id != episode_id:
-            return 409, {"error": "browser refresh episode is not active"}
-
-        try:
-            submission_id = self.submit_cookie_update(
-                source="browser_refresh",
-                cookie_text=cookie_text,
-                sender_open_id="",
-                send_replies=False,
-            )
-        except SubmissionBusyError:
-            return 409, {"error": "cookie submission already in progress"}
-        except OSError:
-            return 500, {"error": "cookie write failed"}
-
-        return 202, {"ok": True, "submission_id": submission_id, "episode_id": episode_id}
-
     def _submit_cookie(self, sender_open_id: str, cookie_text: str) -> None:
         try:
             self.submit_cookie_update(
-                source="feishu_manual",
                 cookie_text=cookie_text,
                 sender_open_id=sender_open_id,
-                send_replies=True,
             )
         except SubmissionBusyError:
             self._send_reply_safely(sender_open_id, "已有更新在校验，请稍后重试")
@@ -649,14 +606,7 @@ class FeishuControlPlane:
 def build_request_handler(control_plane: FeishuControlPlane):
     class FeishuCallbackHandler(BaseHTTPRequestHandler):
         def do_POST(self):
-            if self.path == control_plane.browser_cookie_submit_path:
-                content_length = int(self.headers.get("Content-Length", "0"))
-                raw_body = self.rfile.read(content_length)
-                status_code, payload = control_plane.handle_browser_cookie_submit_request(
-                    headers=self.headers,
-                    raw_body=raw_body,
-                )
-            elif self.path == control_plane.config.callback_path:
+            if self.path == control_plane.config.callback_path:
                 content_length = int(self.headers.get("Content-Length", "0"))
                 raw_body = self.rfile.read(content_length)
                 status_code, payload = control_plane.handle_callback_request(raw_body)

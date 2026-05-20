@@ -1,295 +1,132 @@
 # IdlePilot Agent
 
-AI operations agent for second-hand marketplace workflows, based on the Xianyu
-AutoAgent runtime. It keeps a seller account responsive, routes buyer messages
-to specialized LLM agents, negotiates within configured rules, preserves
-conversation context, and exposes a Feishu operator control plane for runtime
-recovery.
+AI operations agent for second-hand marketplace customer service, expert
+routing, bargaining, and runtime recovery.
 
-This repository is maintained as the `idlepilot-agent` publishing source. The
-Chinese setup guide below still uses the original Xianyu AutoAgent framing where
-that wording matches the marketplace integration.
+[中文 README](README.zh-CN.md)
 
-# 🚀 Xianyu AutoAgent - 智能闲鱼客服机器人系统
+IdlePilot keeps marketplace conversations moving with LLM-backed intent routing,
+conversation memory, specialized reply agents, and a Feishu operator control
+plane for cookie recovery.
 
-[![Python Version](https://img.shields.io/badge/python-3.8%2B-blue)](https://www.python.org/) [![LLM Powered](https://img.shields.io/badge/LLM-powered-FF6F61)](https://platform.openai.com/)
+## Contract
 
-专为闲鱼平台打造的AI值守解决方案，实现闲鱼平台7×24小时自动化值守，支持多专家协同决策、智能议价和上下文感知对话。 
+- Route buyer messages through `price`, `tech`, or `default` expert flows.
+- Keep recent conversation history as model context.
+- Use OpenAI-compatible `responses` model endpoints.
+- Treat expired cookies as recoverable runtime state.
+- Accept replacement cookies through allowlisted Feishu private chats.
+- Keep browser cookie extraction as a local operator helper, not a long-running
+  service.
 
+## Layout
 
-## 🌟 核心特性
-
-### 智能对话引擎
-| 功能模块   | 技术实现            | 关键特性                                                     |
-| ---------- | ------------------- | ------------------------------------------------------------ |
-| 上下文感知 | 会话历史存储        | 轻量级对话记忆管理，完整对话历史作为LLM上下文输入            |
-| 专家路由   | LLM prompt+规则路由 | 基于提示工程的意图识别 → 专家Agent动态分发，支持议价/技术/客服多场景切换 |
-
-### 业务功能矩阵
-| 模块     | 已实现                        | 规划中                       |
-| -------- | ----------------------------- | ---------------------------- |
-| 核心引擎 | ✅ LLM自动回复<br>✅ 上下文管理 | 🔄 情感分析增强               |
-| 议价系统 | ✅ 阶梯降价策略                | 🔄 市场比价功能               |
-| 技术支持 | ✅ 网络搜索整合                | 🔄 RAG知识库增强              |
-| 运维监控 | ✅ 基础日志                    | 🔄 钉钉集成<br>🔄  Web管理界面 |
-
-## 🎨效果图
-<div align="center">
-  <img src="./images/demo1.png" width="600" alt="客服">
-  <br>
-  <em>图1: 客服随叫随到</em>
-</div>
-
-
-<div align="center">
-  <img src="./images/demo2.png" width="600" alt="议价专家">
-  <br>
-  <em>图2: 阶梯式议价</em>
-</div>
-
-<div align="center">
-  <img src="./images/demo3.png" width="600" alt="技术专家"> 
-  <br>
-  <em>图3: 技术专家上场</em>
-</div>
-
-<div align="center">
-  <img src="./images/log.png" width="600" alt="后台log"> 
-  <br>
-  <em>图4: 后台log</em>
-</div>
-
-
-## 🚴 快速开始
-小白请直接查看[保姆级教学文档](https://my.feishu.cn/wiki/JtkBwkI9GiokZikVdyNceEfZncE)
-### 环境要求
-- Python 3.8+
-
-### 安装步骤
-```bash
-1. 克隆仓库
-git clone https://github.com/shaxiu/XianyuAutoAgent.git
-cd XianyuAutoAgent
-
-2. 安装依赖
-pip install -r requirements.txt
-
-3. 配置环境变量
-创建一个 `.env` 文件，包含以下内容，也可直接重命名 `.env.example` ：
-#必配配置
-API_KEY=apikey通过模型平台获取
-COOKIES_STR=填写网页端获取的cookie（仅启动兜底）
-COOKIE_FILE_PATH=data/cookies.txt
-MODEL_BASE_URL=模型地址
-MODEL_NAME=模型名称
-#可选配置
-MODEL_REASONING_EFFORT=全局默认推理强度，可选 none/minimal/low/medium/high/xhigh
-CLASSIFY_MODEL_REASONING_EFFORT=意图分类Agent推理强度，优先级高于全局默认
-PRICE_MODEL_REASONING_EFFORT=议价Agent推理强度，优先级高于全局默认
-TECH_MODEL_REASONING_EFFORT=技术Agent推理强度，优先级高于全局默认
-DEFAULT_MODEL_REASONING_EFFORT=默认回复Agent推理强度，优先级高于全局默认
-TECH_ENABLE_SEARCH=True/False #技术Agent是否向模型转发enable_search，默认False
-TOGGLE_KEYWORDS=接管模式切换关键词，默认为句号（输入句号切换为人工接管，再次输入则切换AI接管）
-SIMULATE_HUMAN_TYPING=True/False #模拟人工回复延迟
-FEISHU_APP_ID=飞书自建应用的 App ID
-FEISHU_APP_SECRET=飞书自建应用的 App Secret
-FEISHU_ADMIN_OPEN_IDS=允许提交 Cookie 的管理员 open_id，逗号分隔
-FEISHU_CALLBACK_HOST=飞书回调服务监听地址，默认 127.0.0.1
-FEISHU_CALLBACK_PORT=飞书回调服务监听端口，默认 8100
-FEISHU_CALLBACK_PATH=飞书事件回调路径，默认 /feishu/events
-FEISHU_CALLBACK_MODE=事件校验模式，当前版本建议使用 token
-FEISHU_VERIFICATION_TOKEN=FEISHU_CALLBACK_MODE=token 时必填
-FEISHU_ENCRYPT_KEY=FEISHU_CALLBACK_MODE=encrypt 时使用；当前构建不支持加密事件体
-FEISHU_STALE_LOCK_SECONDS=单飞提交锁的过期秒数，默认 300
-BROWSER_REFRESH_URL=Tailscale Serve 暴露出来的私有 noVNC 地址，例如 https://<device>.<tailnet>.ts.net
-BROWSER_REFRESH_SHARED_SECRET=browser-refresh 容器提交 Cookie 到控制面的共享密钥
-BROWSER_REFRESH_SUBMIT_URL=browser-refresh 提交 Cookie 的内部地址，默认 http://feishu-control-plane:8100/internal/browser-cookie-submit
-BROWSER_REFRESH_POLL_INTERVAL_SECONDS=browser-refresh 轮询 runtime_status.json 的间隔秒数，可选，默认 5
-
-注意：当前版本统一使用 OpenAI `responses` 协议；如需使用其他 API，请确认服务端兼容 `responses` 请求格式，再修改 `.env` 文件中的模型地址和模型名称；
-推理强度支持全局默认值，也支持按 Agent 单独覆盖，未配置时会自动回退到默认行为；
-如果你的转发 API 不支持 `enable_search`，请保持 `TECH_ENABLE_SEARCH=False`；
-COOKIES_STR自行在闲鱼网页端获取cookies(网页端F12打开控制台，选择Network，点击Fetch/XHR,点击一个请求，查看cookies)；
-运行时Cookie实时来源为 `data/cookies.txt`，程序会优先读取该文件；
-当Cookie失效并触发 `CookieInvalidError` 后，进程不会退出，会进入等待状态，更新 `data/cookies.txt` 后自动恢复连接；
-运行时不会再回写 `.env` 中的 `COOKIES_STR`，`.env` 仅用于启动兼容兜底。
-如果启用飞书私聊控制面，请把飞书事件订阅模式配置为 `token` 校验，并将回调 URL 指向 `https://<你的域名><FEISHU_CALLBACK_PATH>`；
-版本 1 仅接受白名单管理员的私聊文本消息，不接受群聊提交，不会回显 Cookie 内容；
-控制面会将提交状态写入 `data/cookie_submission_state.json`，主进程会将恢复状态写入 `data/runtime_status.json`，控制面会将主动告警去重状态写入 `data/alert_state.json`；
-主进程在 `waiting_for_cookie`、`validating_new_cookie`、`validation_failed`、`recovered` 状态中会附带稳定的 `cookie_invalid_episode_id`，供控制面做每次失效事件的一次性告警去重；
-控制面会在运行状态进入 `waiting_for_cookie` 时主动私聊所有白名单管理员，同一个 `cookie_invalid_episode_id` 只主动告警一次，即使控制面在中途重启也不会重复推送；
-当同一失效事件进入 `recovered` 或 `validation_failed` 终态后，控制面会关闭当前 episode，后续新的失效事件会重新触发主动告警；
-同一时间只允许一个 Cookie 提交处于校验中，后续提交会收到“稍后重试”提示；
-飞书重复回调会按 `event_id` / `message_id` 去重，避免重复写入和重复回复。
-
-4. 创建提示词文件prompts/*_prompt.txt（也可以直接将模板名称中的_example去掉），否则默认读取四个提示词模板中的内容
+```text
+main.py                         main service loop and recovery state
+XianyuAgent.py                  message orchestration and expert routing
+XianyuApis.py                   marketplace API adapter
+context_manager.py              conversation memory
+services/feishu_control_plane.py Feishu operator control plane
+tools/chrome-cookie-exporter/   local Chrome cookie extraction helper
+tests/                          regression tests
 ```
 
-### 使用方法
+## Configure
 
-运行主程序：
+Copy `.env.example` to `.env` and fill the local values:
+
+```env
+API_KEY=
+COOKIES_STR=
+COOKIE_FILE_PATH=data/cookies.txt
+MODEL_BASE_URL=
+MODEL_NAME=
+MODEL_REASONING_EFFORT=
+CLASSIFY_MODEL_REASONING_EFFORT=
+PRICE_MODEL_REASONING_EFFORT=
+TECH_MODEL_REASONING_EFFORT=
+DEFAULT_MODEL_REASONING_EFFORT=
+TECH_ENABLE_SEARCH=False
+TOGGLE_KEYWORDS=.
+SIMULATE_HUMAN_TYPING=False
+FEISHU_APP_ID=
+FEISHU_APP_SECRET=
+FEISHU_ADMIN_OPEN_IDS=
+FEISHU_CALLBACK_HOST=127.0.0.1
+FEISHU_CALLBACK_PORT=8100
+FEISHU_CALLBACK_PATH=/feishu/events
+FEISHU_CALLBACK_MODE=token
+FEISHU_VERIFICATION_TOKEN=
+FEISHU_ENCRYPT_KEY=
+FEISHU_STALE_LOCK_SECONDS=300
+```
+
+Do not commit `.env`, live cookies, callback URLs, operator IDs, runtime state,
+or agent planning files.
+
+## Run
+
+Install dependencies:
+
+```bash
+pip install -r requirements.txt
+```
+
+Create local prompt files:
+
+```bash
+cp prompts/classify_prompt_example.txt prompts/classify_prompt.txt
+cp prompts/price_prompt_example.txt prompts/price_prompt.txt
+cp prompts/tech_prompt_example.txt prompts/tech_prompt.txt
+cp prompts/default_prompt_example.txt prompts/default_prompt.txt
+```
+
+Run the agent:
+
 ```bash
 python main.py
 ```
 
-启动飞书控制面：
+Run the Feishu control plane:
+
 ```bash
 python -m services.feishu_control_plane
 ```
 
-控制面启动后会打印一个手工校验命令，可直接用来验证本地服务和回调路径是否正确。
+Docker Compose:
 
-使用 Docker Compose 启动双进程：
 ```bash
-docker compose up -d --build xianyu-main feishu-control-plane browser-refresh
-```
-
-查看运行状态：
-```bash
-docker compose ps
+docker compose up -d --build --remove-orphans xianyu-main feishu-control-plane
 docker compose logs -f xianyu-main
 docker compose logs -f feishu-control-plane
-docker compose logs -f browser-refresh
 ```
 
-停止服务：
-```bash
-docker compose down
-```
+## Recovery
 
-Docker Compose 部署说明：
+When cookies expire, the main process writes runtime status under `data/` and
+waits for a valid replacement. The Feishu control plane notifies allowlisted
+operators and accepts full cookie text through private chat. A validated cookie
+returns the agent to `recovered`; a failed validation keeps the episode open for
+the next replacement.
 
-- `xianyu-main` 负责闲鱼主循环和 Cookie 自动恢复
-- `feishu-control-plane` 负责飞书私聊回调、管理员鉴权和写入 `data/cookies.txt`
-- `browser-refresh` 负责维持一个持久 Chromium 会话、通过 noVNC 提供人工介入界面，并在页面恢复有效后自动提交浏览器中的最新 Cookie
-- 三个容器共享 `./data`、`./prompts`，并通过同一个 `.env` 注入环境变量
-- `feishu-control-plane` 仅映射到宿主机 `127.0.0.1:8100`
-- `browser-refresh` 的 noVNC 仅映射到宿主机 `127.0.0.1:6080`
-- 现有独立运行的 Cloudflare Tunnel 继续将 `feishu-bot.<你的域名>` 转发到宿主机 `http://localhost:8100`
-- 当前共享 Cloudflare Tunnel 保持不变，不用于暴露 noVNC 或浏览器会话
-- 该 Compose 方案不会占用 `8080`，不会影响你现有的 `sub2api` 服务
+`tools/chrome-cookie-exporter/` is available for local browser-side extraction.
+The legacy long-running browser sidecar service has been removed.
 
-### Tailscale Serve 远程浏览器接入
-
-`browser-refresh` 的 noVNC 只监听宿主机 `127.0.0.1:6080`。如果要让运维从 Mac 或手机进入这个私有浏览器，会话入口必须由宿主机级别的 `tailscaled` + `tailscale serve` 提供，不能指望容器自己暴露出去。
-
-推荐配置步骤：
-
-1. 在运行 Docker Compose 的宿主机安装并登录 Tailscale，确保 `tailscaled` 在宿主机上运行。
-2. 在宿主机执行 `tailscale serve`，把 `http://127.0.0.1:6080` 代理到 tailnet 内可访问的 HTTPS 地址。
-3. 把这个地址写入 `.env` 的 `BROWSER_REFRESH_URL`，让飞书等待告警和运维手册都引用同一个远程 noVNC 入口。
-
-示例：
+## Verify
 
 ```bash
-tailscale serve --bg 443 http://127.0.0.1:6080
+python -m unittest discover -s tests
 ```
 
-当前运维分工：
+Expected result:
 
-- Mac 运维端可以继续使用 Tailscale SSH 登录宿主机，同时也能直接打开 `BROWSER_REFRESH_URL` 进入浏览器
-- 手机运维端不需要 SSH，只需要打开 `BROWSER_REFRESH_URL` 即可进入 noVNC
-- `tailscale serve` 只负责把私有浏览器 UI 从 `127.0.0.1:6080` 代理到 tailnet，不改变 Compose 的 loopback 绑定
-- 现有共享 Cloudflare Tunnel 继续只承接飞书回调入口，不需要修改，也不应该拿来暴露 noVNC
+```text
+Ran 48 tests
+OK
+```
 
-### 飞书 Cookie 控制面
+## Scope
 
-1. 在飞书开放平台创建自建应用并启用机器人能力。
-2. 在事件订阅中开启私聊消息事件，并把回调 URL 指向你的 HTTPS 域名加 `FEISHU_CALLBACK_PATH`。
-3. 事件校验模式当前建议选择 `token`，并把同一个 token 写入 `FEISHU_VERIFICATION_TOKEN`。
-4. 将允许操作的管理员 `open_id` 写入 `FEISHU_ADMIN_OPEN_IDS`。
-5. 主进程 `python main.py` 和控制面 `python -m services.feishu_control_plane` 需要部署在同一台机器并共享项目目录下的 `data/`。
-
-支持的私聊命令：
-
-- `/help`：返回支持的命令说明
-- `/status`：返回当前恢复状态、更新时间和最近一条运维提示
-- 直接发送完整 Cookie 文本：写入 `data/cookies.txt` 并启动校验
-
-主动告警行为：
-
-- 运行状态切到 `waiting_for_cookie` 时，控制面会主动私聊所有白名单管理员
-- 同一个 `cookie_invalid_episode_id` 只会主动告警一次
-- `data/alert_state.json` 会持久化当前告警去重状态，避免控制面重启后重复发送
-- 当同一 episode 进入 `recovered` 或 `validation_failed` 后，当前告警 suppression 会关闭，下一次失效 episode 可以再次触发主动告警
-- 旧的 webhook 告警路径已移除，告警统一由飞书应用控制面负责
-
-远程浏览器恢复流：
-
-- 现有 Feishu `waiting_for_cookie` 告警现在会直接附带 `BROWSER_REFRESH_URL`，优先引导运维打开远程 noVNC 浏览器
-- 运维在 noVNC 里完成滑块、人机验证或重新登录
-- 浏览器页面回到有效状态后，`browser-refresh` 会自动读取当前 Chromium 会话中的 Cookie，并调用内部 `BROWSER_REFRESH_SUBMIT_URL`
-- 控制面收到自动提交后仍然沿用现有校验闭环，主进程验证成功就进入 `recovered`
-- 手工复制 / 粘贴 Cookie 到飞书私聊仍然保留，但现在只是兜底方案；只有远程浏览器不可用或自动提交流程失败时才需要手工操作
-
-回执行为：
-
-- 接收成功后立即回复 `已接收，开始校验`
-- 主进程恢复成功后回复 `Cookie 已生效，连接已恢复`
-- 主进程校验失败后回复 `Cookie 已接收，但校验失败，请重新获取`
-- 如果 60 秒内没有等到匹配的恢复结果，会回复超时提示
-
-### 自定义提示词
-
-可以通过编辑 `prompts` 目录下的文件来自定义各个专家的提示词：
-
-- `classify_prompt.txt`: 意图分类提示词
-- `price_prompt.txt`: 价格专家提示词
-- `tech_prompt.txt`: 技术专家提示词
-- `default_prompt.txt`: 默认回复提示词
-
-## 🤝 参与贡献
-
-欢迎通过 Issue 提交建议或 PR 贡献代码，请遵循 [贡献指南](https://contributing.md/)
-
-
-
-## 🛡 注意事项
-
-⚠️ 注意：**本项目仅供学习与交流，如有侵权联系作者删除。**
-
-鉴于项目的特殊性，开发团队可能在任何时间**停止更新**或**删除项目**。
-
-如需学习交流，请联系：[coderxiu@qq.com](https://mailto:coderxiu@qq.com/)
-
-## 📱 交流群
-欢迎加入项目交流群，交流技术、分享经验、互助学习。
-<div align="center">
-  <table>
-    <tr>
-      <td align="center"><strong>交流群18（已满200）</strong></td>
-      <td align="center"><strong>交流群19（推荐加入）</strong></td>
-    </tr>
-    <tr>
-      <td><img src="./images/wx_group18.png" width="300px" alt="交流群18"></td>
-      <td><img src="./images/wx_group19.png" width="300px" alt="交流群19"></td>
-    </tr>
-  </table>
-</div>
-
-## 💼 寻找机会
-
-### <a href="https://github.com/shaxiu">@Shaxiu</a>
-**🔍寻求方向**：**AI产品经理**  
-**📫 联系：** **email**:coderxiu@qq.com；**wx:** coderxiu
-
-### <a href="https://github.com/cv-cat">@CVcat</a>
-**🔍寻求方向**：**研发工程师**（python、java、逆向、爬虫）  
-**📫 联系：** **email:** 992822653@qq.com；**wx:** CVZC15751076989
-## ☕ 请喝咖啡
-您的☕和⭐将助力项目持续更新：
-
-<div align="center">
-  <img src="./images/wechat_pay.jpg" width="400px" alt="微信赞赏码"> 
-  <img src="./images/alipay.jpg" width="400px" alt="支付宝收款码">
-</div>
-
-
-## 📈 Star 趋势
-<a href="https://www.star-history.com/#shaxiu/XianyuAutoAgent&Date">
- <picture>
-   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/svg?repos=shaxiu/XianyuAutoAgent&type=Date&theme=dark" />
-   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/svg?repos=shaxiu/XianyuAutoAgent&type=Date" />
-   <img alt="Star History Chart" src="https://api.star-history.com/svg?repos=shaxiu/XianyuAutoAgent&type=Date" />
- </picture>
-</a>
+This repository is for controlled operational use and experimentation. Review
+the target marketplace's terms, keep conservative prompts, and keep manual
+takeover available before connecting a live account.

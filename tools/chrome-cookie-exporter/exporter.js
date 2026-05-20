@@ -4,8 +4,8 @@ const EXPORT_PROFILES = {
 };
 
 const FEISHU_INGRESS_KEYS = ["unb", "_m_h5_tk", "cookie2", "cna"];
-const RUNTIME_CORE_KEYS = ["unb", "XSRF-TOKEN", "cookie2", "cna", "_m_h5_tk"];
-const RECOMMENDED_EXTRA_KEYS = ["x5sec", "tfstk", "_m_h5_tk_enc"];
+const RUNTIME_CORE_KEYS = ["unb", "cookie2", "cna", "_m_h5_tk"];
+const RECOMMENDED_EXTRA_KEYS = ["XSRF-TOKEN", "x5sec", "tfstk", "_m_h5_tk_enc"];
 const DIAGNOSTIC_COOKIE_ORDER = [
   "unb",
   "_m_h5_tk",
@@ -18,6 +18,7 @@ const RUNTIME_TARGET_URLS = [
   "https://h5api.m.goofish.com/",
   "https://www.goofish.com/",
   "https://passport.goofish.com/",
+  "https://www.taobao.com/",
 ];
 
 const COOKIE_CONTRACT = {
@@ -162,7 +163,7 @@ function buildExportResult({ cookies, profile = EXPORT_PROFILES.runtime } = {}) 
     missingRecommendedExtras,
     shouldWarnFeishuIngress: !hasFeishuIngressKeys && missingFeishuIngressKeys.length > 0,
     shouldWarnRuntimeCore: !hasRuntimeCoreKeys && missingRuntimeCoreKeys.length > 0,
-    shouldWarnRecommendedExtras: false,
+    shouldWarnRecommendedExtras: missingRecommendedExtras.length > 0,
   };
 
   return {
@@ -228,7 +229,7 @@ function buildWarningMessages(options = {}) {
     shouldWarnFeishuIngress = !hasRequiredCookies && missingFeishuIngressKeys.length > 0,
     hasRuntimeCoreKeys = true,
     shouldWarnRuntimeCore = !hasRuntimeCoreKeys && missingRuntimeCoreKeys.length > 0,
-    shouldWarnRecommendedExtras = false,
+    shouldWarnRecommendedExtras = missingRecommendedExtras.length > 0,
     copySucceeded = true,
   } = options;
   const warnings = [];
@@ -251,7 +252,7 @@ function buildWarningMessages(options = {}) {
   }
 
   if (shouldWarnRecommendedExtras && missingRecommendedExtras.length > 0) {
-    warnings.push(`当前结果缺少推荐补充 Cookie: ${missingRecommendedExtras.join(", ")}`);
+    warnings.push(`可选补充项缺失：${missingRecommendedExtras.join(", ")}`);
   }
 
   if (!copySucceeded) {

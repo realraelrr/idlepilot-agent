@@ -69,9 +69,10 @@ function createPopupApp({
       const activeTab = await getActiveTab();
       const pageError = exporter.getPageValidationError(activeTab.url, state.strictValidation);
       if (pageError) {
-        setStatus(elements, pageError);
+        setStatus(elements, "请先打开闲鱼相关页面。");
         setWarnings(elements, []);
         setReadinessSummary(elements, "");
+        setRetryVisibility(elements, true);
         return;
       }
 
@@ -90,6 +91,7 @@ function createPopupApp({
       elements.cookieOutput.value = result.text;
       elements.copyButton.disabled = !result.text;
       setReadinessSummary(elements, buildReadinessSummary(result));
+      setRetryVisibility(elements, false);
 
       if (!result.text) {
         setStatus(elements, "没有读取到可导出的 Cookie，请确认你已登录闲鱼网页版。");
@@ -100,10 +102,9 @@ function createPopupApp({
       let copySucceeded = false;
       copySucceeded = await tryWriteClipboard(result.text);
 
-      const modeText = getProfileDisplayText(profile);
       const statusText = copySucceeded
-        ? `已复制${modeText}到剪贴板。`
-        : `已生成${modeText}，但自动复制失败。`;
+        ? getSuccessStatus(profile)
+        : "已生成文本，请手动复制。";
 
       setStatus(elements, statusText);
       setWarnings(elements, buildPopupWarnings(result, copySucceeded));
@@ -180,10 +181,10 @@ function createPopupApp({
       : exporter.EXPORT_PROFILES.runtime;
   }
 
-  function getProfileDisplayText(profile) {
+  function getSuccessStatus(profile) {
     return profile === exporter.EXPORT_PROFILES.diagnostic
-      ? "诊断摘要"
-      : "运行时恢复包";
+      ? "已复制诊断摘要到剪贴板。"
+      : "已复制到剪贴板。";
   }
 
   function buildQueryUrls(activeTabUrl, queryUrls) {
@@ -234,8 +235,17 @@ function createPopupApp({
     for (const warning of warnings) {
       const item = document.createElement("li");
       item.textContent = warning;
+      item.className = getWarningClassName(warning);
       elements.warnings.appendChild(item);
     }
+    elements.warnings.hidden = warnings.length === 0;
+  }
+
+  function getWarningClassName(warning) {
+    if (typeof warning === "string" && warning.startsWith("可选补充项缺失：")) {
+      return "warning-item warning-item--info";
+    }
+    return "warning-item warning-item--warning";
   }
 
   function setReadinessSummary(elements, message) {
@@ -247,13 +257,17 @@ function createPopupApp({
     elements.modeBadge.textContent = profile === exporter.EXPORT_PROFILES.diagnostic
       ? "诊断摘要"
       : "默认推荐：运行时恢复包";
+    elements.modeBadge.hidden = true;
+    elements.copyButton.textContent = "复制";
     elements.toggleExportModeButton.textContent = profile === exporter.EXPORT_PROFILES.diagnostic
-      ? "改为导出运行时恢复包"
-      : "改为导出诊断摘要";
-    elements.retryWithoutValidationButton.textContent = state.strictValidation
-      ? "当前页不符时，忽略页面校验后重试"
-      : "当前已忽略页面校验";
-    elements.retryWithoutValidationButton.disabled = !state.strictValidation;
+      ? "返回默认导出"
+      : "诊断";
+    elements.retryWithoutValidationButton.textContent = "忽略页面校验后重试";
+    elements.retryWithoutValidationButton.disabled = false;
+  }
+
+  function setRetryVisibility(elements, isVisible) {
+    elements.retryWithoutValidationButton.hidden = !isVisible;
   }
 
   function buildPopupWarnings(result, copySucceeded) {

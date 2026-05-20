@@ -108,8 +108,8 @@ test("buildExportResult reports layered readiness fields for partial runtime bun
   assert.equal(result.exportedCookieCount, 4);
   assert.equal(result.exportedTextLength, result.text.length);
   assert.deepEqual(result.missingFeishuIngressKeys, ["_m_h5_tk"]);
-  assert.deepEqual(result.missingRuntimeCoreKeys, ["XSRF-TOKEN", "_m_h5_tk"]);
-  assert.deepEqual(result.missingRecommendedExtras, ["tfstk", "_m_h5_tk_enc"]);
+  assert.deepEqual(result.missingRuntimeCoreKeys, ["_m_h5_tk"]);
+  assert.deepEqual(result.missingRecommendedExtras, ["XSRF-TOKEN", "tfstk", "_m_h5_tk_enc"]);
 });
 
 test("buildWarningMessages mention missing runtime core keys instead of the old generic gate", () => {
@@ -127,7 +127,7 @@ test("buildWarningMessages mention missing runtime core keys instead of the old 
     copySucceeded: true,
   });
 
-  assert.deepEqual(warnings, ["当前结果缺少运行时关键 Cookie: XSRF-TOKEN"]);
+  assert.deepEqual(warnings, ["可选补充项缺失：XSRF-TOKEN, x5sec, tfstk, _m_h5_tk_enc"]);
 });
 
 test("buildExportResult keeps the first occurrence across merged request-surface buckets", () => {
@@ -194,8 +194,8 @@ test("buildWarningMessages still warn about missing runtime core keys when Feish
   });
 
   assert.equal(result.hasFeishuIngressKeys, true);
-  assert.equal(result.hasRuntimeCoreKeys, false);
-  assert.deepEqual(warnings, ["当前结果缺少运行时关键 Cookie: XSRF-TOKEN"]);
+  assert.equal(result.hasRuntimeCoreKeys, true);
+  assert.deepEqual(warnings, ["可选补充项缺失：XSRF-TOKEN, tfstk, _m_h5_tk_enc"]);
 });
 
 test("buildExportResult reports recommended extras without treating them as hard requirements", () => {
@@ -231,7 +231,17 @@ test("buildWarningMessages do not treat missing recommended extras as hard-failu
     copySucceeded: true,
   });
 
-  assert.deepEqual(warnings, []);
+  assert.deepEqual(warnings, ["可选补充项缺失：x5sec, tfstk, _m_h5_tk_enc"]);
+});
+
+test("buildWarningMessages label optional supplemental-cookie gaps as informational", () => {
+  const warnings = buildWarningMessages({
+    missingRecommendedExtras: ["XSRF-TOKEN"],
+    shouldWarnRecommendedExtras: true,
+    copySucceeded: true,
+  });
+
+  assert.deepEqual(warnings, ["可选补充项缺失：XSRF-TOKEN"]);
 });
 
 test("buildExportResult exposes layered readiness and warning metadata for task consumers", () => {
@@ -254,11 +264,11 @@ test("buildExportResult exposes layered readiness and warning metadata for task 
   });
   assert.deepEqual(result.warningContext, {
     missingFeishuIngressKeys: ["_m_h5_tk"],
-    missingRuntimeCoreKeys: ["XSRF-TOKEN", "_m_h5_tk"],
-    missingRecommendedExtras: ["_m_h5_tk_enc"],
+    missingRuntimeCoreKeys: ["_m_h5_tk"],
+    missingRecommendedExtras: ["XSRF-TOKEN", "_m_h5_tk_enc"],
     shouldWarnFeishuIngress: false,
     shouldWarnRuntimeCore: true,
-    shouldWarnRecommendedExtras: false,
+    shouldWarnRecommendedExtras: true,
   });
 });
 
@@ -316,5 +326,21 @@ test("RUNTIME_TARGET_URLS stays aligned with the runtime request-surface priorit
     "https://h5api.m.goofish.com/",
     "https://www.goofish.com/",
     "https://passport.goofish.com/",
+    "https://www.taobao.com/",
   ]);
+});
+
+test("buildExportResult does not treat missing XSRF-TOKEN as a runtime-core failure", () => {
+  const result = buildExportResult({
+    cookies: [
+      makeCookie("unb", "unb-value"),
+      makeCookie("_m_h5_tk", "token-value"),
+      makeCookie("cookie2", "cookie2-value"),
+      makeCookie("cna", "cna-value", ".taobao.com"),
+    ],
+  });
+
+  assert.equal(result.hasRuntimeCoreKeys, true);
+  assert.deepEqual(result.missingRuntimeCoreKeys, []);
+  assert.deepEqual(result.missingRecommendedExtras, ["XSRF-TOKEN", "x5sec", "tfstk", "_m_h5_tk_enc"]);
 });

@@ -11,64 +11,24 @@
       <header class="popup__header">
         <p class="eyebrow">Xianyu Cookie Exporter</p>
         <h1>恢复 Cookie 导出</h1>
-        <p class="lede">
-          默认推荐运行时恢复包；诊断摘要仅用于排查缺口，不代表运行时一定能恢复。
-        </p>
+        <span id="modeBadge" class="badge" hidden>默认推荐：运行时恢复包</span>
       </header>
 
-      <section class="panel panel--accent" role="region" aria-labelledby="modeTitle">
-        <div class="panel__title-row">
-          <h2 id="modeTitle">当前导出配置</h2>
-          <span id="modeBadge" class="badge">默认推荐：运行时恢复包</span>
-        </div>
-        <p class="panel__hint">
-          先导出运行时恢复包，再在需要比对缺失项时切到诊断摘要。
-        </p>
-      </section>
-
-      <section class="panel" role="region" aria-labelledby="statusTitle">
-        <div class="panel__title-row">
-          <h2 id="statusTitle">状态</h2>
-        </div>
-        <p id="status" class="status" role="status">等待导出…</p>
-        <p id="readinessSummary" class="readiness-summary" aria-live="polite"></p>
-        <p class="panel__hint">
-          完成刷新或滑块验证后，请再次导出，避免继续提交旧文本。
-        </p>
-      </section>
-
-      <section class="panel warnings-panel" role="region" aria-labelledby="warningsTitle">
-        <div class="panel__title-row">
-          <h2 id="warningsTitle">警告与补充提示</h2>
-        </div>
-        <p class="panel__hint panel__hint--warning">
-          飞书入口通过只说明文本像 Cookie；真正的运行时恢复仍取决于运行时关键项是否齐全。
-        </p>
-        <ul id="warnings" class="warnings" aria-live="polite"></ul>
-      </section>
-
-      <section class="panel" role="region" aria-labelledby="previewTitle">
-        <div class="panel__title-row">
-          <h2 id="previewTitle">可复制文本预览</h2>
-        </div>
-        <p class="panel__hint">
-          下方文本保持可选中。自动复制失败时，可直接手动复制。
-        </p>
-        <textarea
-          id="cookieOutput"
-          class="cookie-output"
-          readonly
-          spellcheck="false"
-          placeholder="导出的 Cookie 文本会显示在这里"
-        ></textarea>
-      </section>
+      <p id="status" class="status" role="status">等待导出…</p>
+      <p id="readinessSummary" class="readiness-summary" aria-live="polite"></p>
+      <ul id="warnings" class="warnings" aria-live="polite"></ul>
+      <textarea
+        id="cookieOutput"
+        class="cookie-output"
+        readonly
+        spellcheck="false"
+        placeholder="导出的 Cookie 文本会显示在这里"
+      ></textarea>
 
       <section class="actions">
-        <button id="copyButton" type="button">再次复制当前文本</button>
-        <button id="toggleExportModeButton" type="button" class="button button--secondary">改为导出诊断摘要</button>
-        <button id="retryWithoutValidationButton" type="button" class="button button--ghost">
-          当前页不符时，忽略页面校验后重试
-        </button>
+        <button id="copyButton" type="button">复制</button>
+        <button id="toggleExportModeButton" type="button" class="button button--text">诊断</button>
+        <button id="retryWithoutValidationButton" type="button" class="button button--retry" hidden>忽略页面校验后重试</button>
       </section>
     </main>
 
